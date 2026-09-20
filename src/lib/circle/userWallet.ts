@@ -121,6 +121,9 @@ export function explainCircleLoginError(err: unknown): string {
   ) {
     return `Chrome blocked the Circle login window. ${CHROME_LOGIN_HELP}`;
   }
+  if (lower.includes("invalid credentials") || lower.includes("unauthorized") || lower.includes("401")) {
+    return "Circle rejected the login key (invalid credentials). The live App ID and LIVE API key must belong to the same User-Controlled Wallets app. Refresh and try email login again.";
+  }
   return raw;
 }
 

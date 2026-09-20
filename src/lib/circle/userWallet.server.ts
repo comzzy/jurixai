@@ -34,11 +34,17 @@ function pickWalletOnActiveChain<T extends { blockchain?: string | null; address
 }
 
 function client() {
-  const apiKey = process.env.CIRCLE_API_KEY;
+  const apiKey = process.env.CIRCLE_API_KEY?.trim();
   if (!apiKey) {
     throw new Error("CIRCLE_API_KEY is not set on the server (add it in Vercel).");
   }
-  return initiateUserControlledWalletsClient({ apiKey });
+  const live =
+    apiKey.startsWith("LIVE_API_KEY") ||
+    (process.env.CIRCLE_ENV ?? "").trim().toLowerCase() === "production";
+  return initiateUserControlledWalletsClient({
+    apiKey,
+    baseUrl: live ? "https://api.circle.com" : "https://api-sandbox.circle.com",
+  });
 }
 
 type CreateTransactionInput = Parameters<ReturnType<typeof client>["createTransaction"]>[0];
