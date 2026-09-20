@@ -287,20 +287,80 @@ async function startEmailOtp(sdk: W3S, email: string): Promise<void> {
   hardenCircleIframe();
 }
 
-/** Initiate email OTP login and return the session token when verified. */
-export async function getEmailSession(email: string): Promise<Session> {
+async function waitForEmailOtpSession(
+  email: string,
+  fallbackMessage: string,
+  onOtpSent?: () => void,
+): Promise<{ sdk: W3S; session: Session }> {
   let resolveLogin!: (s: Session) => void;
   let rejectLogin!: (e: Error) => void;
   const loginDone = new Promise<Session>((res, rej) => {
     resolveLogin = res;
     rejectLogin = rej;
   });
+  let settled = false;
+  const resolveOnce = (s: Session) => {
+    if (settled) return;
+    settled = true;
+    resolveLogin(s);
+  };
+  const rejectOnce = (e: Error) => {
+    if (settled) return;
+    settled = true;
+    rejectLogin(e);
+  };
 
   const sdk = await createCircleSdk((error, result) =>
-    handleLoginComplete(error, result, resolveLogin, rejectLogin, "Email verification failed."),
+    handleLoginComplete(error, result, resolveOnce, rejectOnce, fallbackMessage),
   );
-  await startEmailOtp(sdk, email);
-  return loginDone;
+
+  const onCircleMessage = (event: MessageEvent) => {
+    const origin = String(event.origin || "");
+    if (!origin.includes("circle.com")) return;
+    const data = event.data as Record<string, unknown> | null;
+    const verified = data?.onEmailLoginVerified as { result?: unknown; error?: unknown } | undefined;
+    if (!verified) return;
+    handleLoginComplete(
+      verified.error as CircleLoginError | undefined,
+      verified.result as CircleLoginResult | undefined,
+      resolveOnce,
+      rejectOnce,
+      fallbackMessage,
+    );
+  };
+  if (typeof window !== "undefined") {
+    window.addEventListener("message", onCircleMessage);
+  }
+
+  loginInFlight = true;
+  try {
+    await startEmailOtp(sdk, email);
+    onOtpSent?.();
+    const session = await Promise.race([
+      loginDone,
+      new Promise<Session>((_, rej) => {
+        window.setTimeout(() => {
+          rej(
+            new Error(
+              "Circle did not finish email verification. Allow third-party cookies for [*.]circle.com, then try again.",
+            ),
+          );
+        }, 180000);
+      }),
+    ]);
+    return { sdk, session };
+  } finally {
+    loginInFlight = false;
+    if (typeof window !== "undefined") {
+      window.removeEventListener("message", onCircleMessage);
+    }
+  }
+}
+
+/** Initiate email OTP login and return the session token when verified. */
+export async function getEmailSession(email: string): Promise<Session> {
+  const { session } = await waitForEmailOtpSession(email, "Email verification failed.");
+  return session;
 }
 
 /** Run a Circle challenge (PIN setup / signing) on an existing SDK instance. */
@@ -376,66 +436,11 @@ export async function emailSignIn(
   email: string,
   onStatusUpdate?: (status: string) => void,
 ): Promise<CircleWallet> {
-  let resolveLogin!: (s: Session) => void;
-  let rejectLogin!: (e: Error) => void;
-  const loginDone = new Promise<Session>((res, rej) => {
-    resolveLogin = res;
-    rejectLogin = rej;
-  });
-  let settled = false;
-  const resolveOnce = (s: Session) => {
-    if (settled) return;
-    settled = true;
-    resolveLogin(s);
-  };
-  const rejectOnce = (e: Error) => {
-    if (settled) return;
-    settled = true;
-    rejectLogin(e);
-  };
-
-  const sdk = await createCircleSdk((error, result) =>
-    handleLoginComplete(error, result, resolveOnce, rejectOnce, "Email login failed."),
-  );
-
-  const onCircleMessage = (event: MessageEvent) => {
-    const origin = String(event.origin || "");
-    if (!origin.includes("circle.com")) return;
-    const data = event.data as Record<string, unknown> | null;
-    const verified = data?.onEmailLoginVerified as { result?: unknown; error?: unknown } | undefined;
-    if (!verified) return;
-    handleLoginComplete(
-      verified.error as CircleLoginError | undefined,
-      verified.result as CircleLoginResult | undefined,
-      resolveOnce,
-      rejectOnce,
-      "Email login failed.",
-    );
-  };
-  if (typeof window !== "undefined") {
-    window.addEventListener("message", onCircleMessage);
-  }
-
   onStatusUpdate?.("sending_otp");
-  loginInFlight = true;
-  try {
-    await startEmailOtp(sdk, email);
-    onStatusUpdate?.("awaiting_otp");
-
-    const session = await Promise.race([
-      loginDone,
-      new Promise<Session>((_, rej) => {
-        window.setTimeout(() => {
-          rej(
-            new Error(
-              "Circle did not finish email verification. Allow third-party cookies for [*.]circle.com, then try again.",
-            ),
-          );
-        }, 180000);
-      }),
-    ]);
-
-    onStatusUpdate?.("verifying_wallet");
+  const { sdk, session } = await waitForEmailOtpSession(email, "Email login failed.", () =>
+    onStatusUpdate?.("awaiting_otp"),
+  );
+  onStatusUpdate?.("verifying_wallet");
     // First-time users have no wallet yet. Reuse THIS sdk instance for the PIN
     // ceremony — Circle's W3SSdk is a singleton, and a second `new W3SSdk()`
     // plus removing the iframe leaves the PIN screen blank on Chrome.
@@ -457,13 +462,7 @@ export async function emailSignIn(
     if (!address) {
       throw new Error("Wallet not ready yet — please try signing in again.");
     }
-    return { identifier: email, address, chain: CHAIN, authMethod: "email" };
-  } finally {
-    loginInFlight = false;
-    if (typeof window !== "undefined") {
-      window.removeEventListener("message", onCircleMessage);
-    }
-  }
+  return { identifier: email, address, chain: CHAIN, authMethod: "email" };
 }
 
 /**
@@ -479,25 +478,17 @@ export async function executeWithdrawal(
   const tid = toast.loading("Initiating secure transaction...");
 
   try {
-    let resolveLogin!: (s: Session) => void;
-    let rejectLogin!: (e: Error) => void;
-    const loginDone = new Promise<Session>((res, rej) => {
-      resolveLogin = res;
-      rejectLogin = rej;
-    });
-
-    const sdk = await createCircleSdk((error, result) =>
-      handleLoginComplete(error, result, resolveLogin, rejectLogin, "Email verification failed."),
+    const { sdk, session } = await waitForEmailOtpSession(
+      email,
+      "Email verification failed.",
+      () => {
+        toast.loading("Email sent. Enter the code in the Circle window, then your 6-digit PIN.", {
+          id: tid,
+        });
+      },
     );
 
-    await startEmailOtp(sdk, email);
-    toast.loading("Email verification code sent. Please enter the code in the secure window.", {
-      id: tid,
-    });
-
-    const session = await loginDone;
-
-    toast.loading("Email verified! Generating secure payment challenge...", { id: tid });
+    toast.loading("Email verified. Creating the Arc USDC transfer…", { id: tid });
     const tx = await createWithdrawalTransaction({
       data: {
         userToken: session.userToken,

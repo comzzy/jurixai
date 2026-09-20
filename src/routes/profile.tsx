@@ -386,16 +386,24 @@ function BalanceCard({
       toast.error("Invalid amount", { description: "Please enter a valid positive USDC amount." });
       return;
     }
+    const gasReserve = 0.02;
     if (balance !== null && val > balance) {
       toast.error("Insufficient balance", {
         description: `Your maximum withdrawable balance is ${balance} USDC.`,
       });
       return;
     }
+    if (balance !== null && val > Math.max(0, balance - gasReserve)) {
+      toast.error("Leave a little USDC for gas", {
+        description: `Arc fees are paid in USDC. Withdraw at most ${(balance - gasReserve).toFixed(2)} USDC so the transfer can complete.`,
+      });
+      return;
+    }
 
     setWithdrawing(true);
+    setIsWithdrawOpen(false);
     toast.info("Initiating withdrawal...", {
-      description: "We will trigger an email verification OTP to authenticate you.",
+      description: "Enter the email code, then your 6-digit PIN, in the Circle window.",
     });
     try {
       const { executeWithdrawal } = await import("@/lib/circle/userWallet");
@@ -524,8 +532,9 @@ function BalanceCard({
             Withdraw USDC
           </DialogTitle>
           <p className="text-xs text-muted-foreground -mt-2">
-            Send Arc USDC from your smart wallet to any external EVM address. Requires email
-            verification.
+            Send Arc USDC from your smart wallet to any Arc Mainnet address. After the email
+            code, enter your 6-digit PIN. Leave a little USDC in the wallet for gas — withdrawing
+            the full balance can fail.
           </p>
           <form onSubmit={handleWithdraw} className="mt-4 space-y-4">
             <div>

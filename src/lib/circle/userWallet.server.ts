@@ -306,7 +306,8 @@ export const createWithdrawalTransaction = createServerFn({ method: "POST" })
       );
     }
 
-    // 1. Fetch user's token balances to find the dynamic USDC tokenId registered by Circle
+    // Arc USDC is native (18-dec eth_getBalance) and ERC-20 (6-dec) at 0x3600…0000.
+    // Prefer the native / 0x3600 token Circle registered for this wallet.
     let tokenId = "";
     try {
       const balancesRes = await c.getWalletTokenBalance({
@@ -314,11 +315,14 @@ export const createWithdrawalTransaction = createServerFn({ method: "POST" })
         userToken: data.userToken,
       });
       const tokenBalances = balancesRes.data?.tokenBalances ?? [];
+      const usdcAddr = USDC_ADDRESS.toLowerCase();
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const usdcToken = tokenBalances.find((tb: any) => tb.token?.symbol?.toUpperCase() === "USDC");
-      if (usdcToken?.token?.id) {
-        tokenId = usdcToken.token.id;
-      }
+      const rows = tokenBalances as any[];
+      const picked =
+        rows.find((tb) => tb.token?.isNative) ??
+        rows.find((tb) => String(tb.token?.tokenAddress ?? "").toLowerCase() === usdcAddr) ??
+        rows.find((tb) => String(tb.token?.symbol ?? "").toUpperCase() === "USDC");
+      if (picked?.token?.id) tokenId = picked.token.id;
     } catch (e) {
       console.warn(
         "[createWithdrawalTransaction] failed to fetch balances, using fallback address:",
@@ -326,12 +330,16 @@ export const createWithdrawalTransaction = createServerFn({ method: "POST" })
       );
     }
 
+    const amountText = Number(data.amount).toFixed(6).replace(/\.?0+$/, "") || "0";
+    const blockchainParam = CHAIN as NonNullable<CreateTransactionInput["blockchain"]>;
     const txParams: CreateTransactionInput = {
       userToken: data.userToken,
       idempotencyKey: crypto.randomUUID(),
       walletId,
-      amounts: [String(data.amount)],
+      amounts: [amountText],
       destinationAddress: data.recipientAddress,
+      tokenAddress: USDC_ADDRESS,
+      blockchain: blockchainParam,
       fee: {
         type: "level",
         config: {
@@ -339,18 +347,26 @@ export const createWithdrawalTransaction = createServerFn({ method: "POST" })
         },
       },
     };
+    if (tokenId) txParams.tokenId = tokenId;
 
-    if (tokenId) {
-      txParams.tokenId = tokenId;
-    } else {
-      // Fallback: pass tokenAddress and blockchain
-      const blockchainParam = CHAIN as NonNullable<CreateTransactionInput["blockchain"]>;
-      txParams.tokenAddress = USDC_ADDRESS;
-      txParams.blockchain = blockchainParam;
+    try {
+      const res = await c.createTransaction(txParams);
+      return { challengeId: res.data?.challengeId ?? null };
+    } catch (err) {
+      const anyErr = err as {
+        message?: string;
+        code?: number;
+        response?: { data?: { message?: string; code?: number } };
+      };
+      const circleMessage =
+        anyErr.response?.data?.message || anyErr.message || "Circle transfer failed";
+      const code = anyErr.response?.data?.code ?? anyErr.code;
+      throw new Error(
+        code
+          ? `Circle transfer failed (${code}): ${circleMessage}`
+          : `Circle transfer failed: ${circleMessage}`,
+      );
     }
-
-    const res = await c.createTransaction(txParams);
-    return { challengeId: res.data?.challengeId ?? null };
   });
 
 export const waitForFundingTransaction = createServerFn({ method: "POST" })
