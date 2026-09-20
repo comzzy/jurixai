@@ -19,7 +19,8 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { useWallet } from "@/lib/circle/useWallet";
-import { readUsdcBalance, explorerAddr } from "@/lib/chain";
+import { explorerAddr, CHAIN_DISPLAY_NAME, CIRCLE_CHAIN_CODE } from "@/lib/chain";
+import { readArcUsdcBalance } from "@/lib/arc";
 import { truncateAddr } from "@/lib/format";
 import {
   loadHostedHackathons,
@@ -84,7 +85,7 @@ function ProfileRoute() {
     setLocation(profile?.location ?? "");
     setWebsite(profile?.website ?? "");
     setPayoutEvmAddress(profile?.payoutEvmAddress ?? wallet?.address ?? "");
-    setPayoutChain(profile?.payoutChain ?? "ARC-TESTNET");
+    setPayoutChain(profile?.payoutChain ?? CIRCLE_CHAIN_CODE);
   }, [profile, wallet]);
 
   if (!wallet) {
@@ -121,7 +122,7 @@ function ProfileRoute() {
         </div>
         <div className="flex items-center gap-2 rounded-full border border-border bg-muted px-3 py-1.5 text-xs font-medium text-muted-foreground">
           <span className="size-1.5 rounded-full bg-accent animate-pulse-dot" />
-          {wallet.identifier} · Arc Testnet
+          {wallet.identifier} · {CHAIN_DISPLAY_NAME}
         </div>
       </header>
 
@@ -354,7 +355,7 @@ function BalanceCard({
     setLoading(true);
     setFailed(false);
     try {
-      setBalance(await readUsdcBalance(address));
+      setBalance(await readArcUsdcBalance(address));
     } catch {
       setFailed(true);
     } finally {
@@ -406,7 +407,7 @@ function BalanceCard({
       setIsWithdrawOpen(false);
       setAmount("");
 
-      // Wait 4 seconds for the transaction to be mined on Arc Testnet before reloading balance
+      // Wait 4 seconds for the transaction to be mined before reloading balance
       setTimeout(() => {
         void load();
       }, 4000);
@@ -494,7 +495,7 @@ function BalanceCard({
 
             {/* Instructions */}
             <p className="text-center text-xs text-muted-foreground leading-relaxed max-w-[280px]">
-              Scan this code to send **USDC** (or native gas tokens) on **Arc Testnet** to your
+              Scan this code to send USDC (or native gas tokens) on {CHAIN_DISPLAY_NAME} to your
               smart wallet.
             </p>
 

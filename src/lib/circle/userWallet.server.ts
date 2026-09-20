@@ -23,6 +23,16 @@ import {
 
 const CHAIN = CIRCLE_CHAIN_CODE;
 
+function pickWalletOnActiveChain<T extends { blockchain?: string | null; address?: string | null; id?: string | null }>(
+  wallets: T[],
+): T | undefined {
+  const wanted = CHAIN.toUpperCase();
+  return (
+    wallets.find((w) => (w.blockchain ?? "").toUpperCase() === wanted) ??
+    (wanted === "ARC" ? wallets.find((w) => (w.blockchain ?? "").toUpperCase() === "ARC-MAINNET") : undefined)
+  );
+}
+
 function client() {
   const apiKey = process.env.CIRCLE_API_KEY;
   if (!apiKey) {
@@ -65,43 +75,24 @@ export const emailLoginStart = createServerFn({ method: "POST" })
 export const provisionWallet = createServerFn({ method: "POST" })
   .validator((d: { userToken: string; email: string }) => d)
   .handler(async ({ data }) => {
-    // 1. Fast path: check if user and their wallet already exist in our Supabase DB
-    const url = process.env.VITE_SUPABASE_URL;
-    const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-
-    if (url && serviceKey) {
-      const { createClient } = await import("@supabase/supabase-js");
-      const supabase = createClient(url, serviceKey, {
-        auth: { persistSession: false, autoRefreshToken: false },
-      });
-
-      const emailLower = data.email.trim().toLowerCase();
-      const { data: user } = await supabase
-        .from("users")
-        .select("id")
-        .ilike("email", emailLower)
-        .maybeSingle();
-
-      if (user) {
-        const { data: wallet } = await supabase
-          .from("wallets")
-          .select("smart_account")
-          .eq("user_id", user.id)
-          .eq("is_primary", true)
-          .maybeSingle();
-
-        if (wallet?.smart_account) {
-          return { challengeId: null as string | null, address: wallet.smart_account };
-        }
-      }
-    }
-
-    // 2. Slow path: fallback to Circle API
     const c = client();
     const existing = await c.listWallets({ userToken: data.userToken });
     const wallets = existing.data?.wallets ?? [];
+    const onActiveChain = pickWalletOnActiveChain(wallets);
+    if (onActiveChain?.address) {
+      return { challengeId: null as string | null, address: onActiveChain.address };
+    }
     if (wallets.length > 0) {
-      return { challengeId: null as string | null, address: wallets[0].address ?? null };
+      const created = await c.createWallet({
+        userToken: data.userToken,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        blockchains: [CHAIN as any],
+        accountType: "SCA",
+      });
+      return {
+        challengeId: created.data?.challengeId ?? null,
+        address: null as string | null,
+      };
     }
     // First-time user: no PIN and no wallet yet. createUserPinWithWallets sets a
     // PIN and creates the wallet(s) in one challenge (createWallet alone assumes a
@@ -130,7 +121,7 @@ export const listUserWallets = createServerFn({ method: "POST" })
   .validator((d: { userToken: string }) => d)
   .handler(async ({ data }) => {
     const res = await client().listWallets({ userToken: data.userToken });
-    const w = res.data?.wallets?.[0];
+    const w = pickWalletOnActiveChain(res.data?.wallets ?? []);
     return { id: w?.id ?? null, address: w?.address ?? null, blockchain: w?.blockchain ?? null };
   });
 
@@ -141,9 +132,15 @@ export const createWithdrawalTransaction = createServerFn({ method: "POST" })
 
     // Fetch user wallets to find the walletId internally
     const walletsRes = await c.listWallets({ userToken: data.userToken });
-    const walletId = walletsRes.data?.wallets?.[0]?.id;
+    const selected = pickWalletOnActiveChain(walletsRes.data?.wallets ?? []);
+    const walletId = selected?.id ?? walletsRes.data?.wallets?.[0]?.id;
     if (!walletId) {
       throw new Error("Could not locate your Circle wallet ID on the server.");
+    }
+    if (!selected?.id) {
+      throw new Error(
+        `No ${CHAIN_DISPLAY_NAME} Circle wallet found. Sign out and sign in again to create an Arc Mainnet wallet.`,
+      );
     }
 
     // 1. Fetch user's token balances to find the dynamic USDC tokenId registered by Circle
