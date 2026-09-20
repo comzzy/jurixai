@@ -10,7 +10,7 @@ const NAV = [
   { to: "/hackathons", label: "Browse", isRouter: true },
   { to: "/create", label: "Host", isRouter: true },
   { to: "/profile", label: "Dashboard", isRouter: true },
-  { to: "/playground?chain=xlayerMainnet", label: "ASP Playground", isRouter: false },
+  { to: "/playground", label: "ASP Playground", isRouter: false },
   { to: "/docs", label: "Docs", isRouter: true },
 ] as const;
 

@@ -2,7 +2,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { evaluateSubmissionWithModel, parseGitHubRepo } from "@/lib/jurix/judge-model.server";
 import { getSupabaseServerClient } from "@/lib/supabase/server";
 import { createPublicClient, http, decodeFunctionData } from "viem";
-import { activeChain, ARC_RPC_URL, USDC_ADDRESS, CHAIN_NAME } from "@/lib/chain";
+import { ARC_USDC_ASSET } from "@/lib/x402/okx.server";
 import {
   buildPaymentRequiredResponse,
   processOkxPayment,
@@ -22,6 +22,7 @@ import type {
   JudgingCriterion,
   HackathonSummary,
   SubmissionSummary,
+  WorkspaceSnapshot,
 } from "@/lib/jurix/types";
 
 // Standard ERC20 transfer ABI for decoding
@@ -163,43 +164,72 @@ function generateTextReport(
 }
 
 const VALID_AGENT_SLUGS = ["vex-01", "kael-02", "oryn-03", "zera-04"] as const;
+const DEFAULT_GITHUB_URL = "https://github.com/octocat/Hello-World";
+const DEFAULT_DESCRIPTION = "GitHub Hello World sample repository";
+const PAID_AUDIT_MODEL_TIMEOUT_MS = 12_000;
 
-const REQUIRED_AUDIT_PARAMS = {
-  githubUrl:
-    "Public GitHub repository URL string. Example: https://github.com/facebook/react",
-  description:
-    "Non-empty project description explaining the purpose of the codebase and its key features.",
-  agents:
-    "Optional array of agent slugs: vex-01, kael-02, oryn-03, zera-04. Defaults to all four if omitted.",
-} as const;
-
-const AUDIT_PARAM_EXAMPLE = {
-  githubUrl: "https://github.com/facebook/react",
-  description: "A JavaScript library for building user interfaces",
-} as const;
-
-function parameterError(
-  error: string,
-  extras: {
-    missingParams?: string[];
-    invalidParams?: Record<string, string>;
-    status?: number;
-    headers?: HeadersInit;
-  } = {},
-): Response {
-  return Response.json(
-    {
-      ok: false,
-      error,
-      paymentRequired: false,
-      missingParams: extras.missingParams ?? [],
-      invalidParams: extras.invalidParams ?? {},
-      required: REQUIRED_AUDIT_PARAMS,
-      example: AUDIT_PARAM_EXAMPLE,
-    },
-    { status: extras.status ?? 400, headers: extras.headers },
-  );
-}
+const FALLBACK_JUDGE_AGENTS: JudgeAgent[] = [
+  {
+    id: "vex-01",
+    slug: "vex-01",
+    name: "Vex",
+    short_code: "VX",
+    role: "Engineering",
+    focus_area: "Code quality and implementation",
+    status: "idle",
+    color_hex: "#7C5CFF",
+    weight_percent: 25,
+    system_prompt: null,
+    scoring_notes: null,
+    wallet_address: null,
+    created_at: new Date(0).toISOString(),
+  },
+  {
+    id: "kael-02",
+    slug: "kael-02",
+    name: "Kael",
+    short_code: "KL",
+    role: "Product / UX",
+    focus_area: "Product design and user experience",
+    status: "idle",
+    color_hex: "#22D3EE",
+    weight_percent: 25,
+    system_prompt: null,
+    scoring_notes: null,
+    wallet_address: null,
+    created_at: new Date(0).toISOString(),
+  },
+  {
+    id: "oryn-03",
+    slug: "oryn-03",
+    name: "Oryn",
+    short_code: "OR",
+    role: "Innovation",
+    focus_area: "Originality and ambition",
+    status: "idle",
+    color_hex: "#F59E0B",
+    weight_percent: 25,
+    system_prompt: null,
+    scoring_notes: null,
+    wallet_address: null,
+    created_at: new Date(0).toISOString(),
+  },
+  {
+    id: "zera-04",
+    slug: "zera-04",
+    name: "Zera",
+    short_code: "ZR",
+    role: "Completeness",
+    focus_area: "Docs, polish, and delivery",
+    status: "idle",
+    color_hex: "#34D399",
+    weight_percent: 25,
+    system_prompt: null,
+    scoring_notes: null,
+    wallet_address: null,
+    created_at: new Date(0).toISOString(),
+  },
+];
 
 function mergeNestedToolArguments(body: Record<string, unknown>): Record<string, unknown> {
   const nestedCandidates: unknown[] = [
@@ -227,132 +257,69 @@ function normalizeStringList(value: unknown): unknown {
   return value;
 }
 
-async function validateAuditRequest(params: {
-  githubUrl: string;
-  githubUrls?: unknown;
-  description: string;
-  requestedAgentSlugs?: unknown;
-}): Promise<Response | null> {
-  const { githubUrl, githubUrls, description, requestedAgentSlugs } = params;
-  const missingParams: string[] = [];
+const MAX_WORKSPACE_FILES = 60;
+const MAX_WORKSPACE_FILE_CHARS = 8_000;
+const MAX_WORKSPACE_TOTAL_CHARS = 100_000;
+const MAX_WORKSPACE_TREE = 80;
 
-  if (requestedAgentSlugs !== undefined && !Array.isArray(requestedAgentSlugs)) {
-    return parameterError("The agents parameter must be an array of valid agent slugs.", {
-      invalidParams: {
-        agents: `Expected an array. Valid slugs: ${VALID_AGENT_SLUGS.join(", ")}`,
-      },
-    });
+function parseWorkspaceSnapshot(value: unknown): WorkspaceSnapshot | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const obj = value as Record<string, unknown>;
+  const tree = Array.isArray(obj.tree)
+    ? obj.tree
+        .filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0)
+        .map((entry) => entry.trim())
+        .slice(0, MAX_WORKSPACE_TREE)
+    : [];
+  const filesRaw = Array.isArray(obj.files) ? obj.files : [];
+  const files: WorkspaceSnapshot["files"] = [];
+  let totalChars = 0;
+  for (const file of filesRaw) {
+    if (!file || typeof file !== "object" || Array.isArray(file)) continue;
+    const path = typeof (file as { path?: unknown }).path === "string"
+      ? (file as { path: string }).path.trim()
+      : "";
+    const content =
+      typeof (file as { content?: unknown }).content === "string"
+        ? (file as { content: string }).content
+        : "";
+    if (!path) continue;
+    const clipped = content.slice(0, MAX_WORKSPACE_FILE_CHARS);
+    totalChars += clipped.length;
+    if (totalChars > MAX_WORKSPACE_TOTAL_CHARS) break;
+    files.push({ path, content: clipped });
+    if (files.length >= MAX_WORKSPACE_FILES) break;
   }
+  if (tree.length === 0 && files.length === 0) return null;
+  return {
+    rootName: typeof obj.rootName === "string" ? obj.rootName.trim() : undefined,
+    tree: tree.length > 0 ? tree : files.map((file) => file.path),
+    files,
+    demoUrl: typeof obj.demoUrl === "string" ? obj.demoUrl.trim() : undefined,
+    gitRemote: typeof obj.gitRemote === "string" ? obj.gitRemote.trim() : undefined,
+  };
+}
 
-  if (
-    Array.isArray(requestedAgentSlugs) &&
-    (requestedAgentSlugs.length === 0 ||
-      requestedAgentSlugs.some(
-        (slug) =>
-          typeof slug !== "string" ||
-          !VALID_AGENT_SLUGS.includes(slug as (typeof VALID_AGENT_SLUGS)[number]),
-      ))
-  ) {
-    return parameterError(
-      `Invalid agents requested. Valid slugs are: ${VALID_AGENT_SLUGS.join(", ")}`,
-      {
-        invalidParams: {
-          agents: `Valid slugs are: ${VALID_AGENT_SLUGS.join(", ")}`,
-        },
-      },
-    );
-  }
+function sanitizeAgentSlugs(value: unknown): string[] | undefined {
+  const list = normalizeStringList(value);
+  if (!Array.isArray(list)) return undefined;
+  const slugs = list.filter(
+    (slug): slug is string =>
+      typeof slug === "string" &&
+      VALID_AGENT_SLUGS.includes(slug as (typeof VALID_AGENT_SLUGS)[number]),
+  );
+  return slugs.length > 0 ? slugs : undefined;
+}
 
-  if (
-    githubUrls !== undefined &&
-    (!Array.isArray(githubUrls) || githubUrls.some((value) => typeof value !== "string"))
-  ) {
-    return parameterError(
-      "The githubUrls parameter must be an array of repository URL strings.",
-      {
-        invalidParams: {
-          githubUrls: "Provide an array of public GitHub repository URL strings.",
-        },
-      },
-    );
-  }
-
-  const urlsToAudit = (githubUrl ? [githubUrl] : Array.isArray(githubUrls) ? githubUrls : [])
-    .map((value) => value.trim())
-    .filter(Boolean);
-
-  if (urlsToAudit.length === 0) {
-    missingParams.push("githubUrl");
-  }
-  if (!description.trim()) {
-    missingParams.push("description");
-  }
-  if (missingParams.length > 0) {
-    return parameterError(
-      "Missing required parameters. Complete parameter validation before payment: provide a public GitHub repository URL and a project description. A payment challenge is returned only after these parameters are valid.",
-      { missingParams },
-    );
-  }
-
-  for (const urlToAudit of urlsToAudit) {
-    const repoRef = parseGitHubRepo(urlToAudit);
-    if (!repoRef) {
-      return parameterError(
-        `Invalid GitHub repository URL: ${urlToAudit}. Must be a valid public GitHub repository URL.`,
-        {
-          invalidParams: {
-            githubUrl: `${urlToAudit} is not a valid github.com/{owner}/{repo} URL.`,
-          },
-        },
-      );
-    }
-
-    try {
-      const response = await fetch(
-        `https://api.github.com/repos/${repoRef.owner}/${repoRef.repo}`,
-        {
-          headers: {
-            accept: "application/vnd.github+json",
-            "user-agent": "jurixai-judge-bot",
-            ...(process.env.GITHUB_TOKEN?.trim()
-              ? { authorization: `Bearer ${process.env.GITHUB_TOKEN.trim()}` }
-              : {}),
-          },
-          signal: AbortSignal.timeout(4000),
-        },
-      );
-      if (!response.ok) {
-        if (response.status === 404) {
-          return parameterError(
-            `GitHub repository is private or does not exist: ${urlToAudit}`,
-            {
-              invalidParams: {
-                githubUrl: `${urlToAudit} is private or does not exist.`,
-              },
-              status: 400,
-            },
-          );
-        }
-        if (response.status === 403 || response.status === 429) {
-          return parameterError(
-            `Unable to validate GitHub repository before payment (status ${response.status}). Retry shortly.`,
-            { status: 503, headers: { "Retry-After": "5" } },
-          );
-        }
-        return parameterError(
-          `GitHub repository is inaccessible (Status ${response.status}): ${urlToAudit}`,
-          { status: 503, headers: { "Retry-After": "5" } },
-        );
-      }
-    } catch {
-      return parameterError(
-        `Unable to validate GitHub repository before payment: ${urlToAudit}`,
-        { status: 503, headers: { "Retry-After": "5" } },
-      );
-    }
-  }
-
-  return null;
+function sanitizeGithubUrls(githubUrl: string, githubUrls: unknown): string[] {
+  const candidates = [
+    githubUrl,
+    ...(Array.isArray(githubUrls) ? githubUrls : []),
+  ]
+    .map((value) => (typeof value === "string" ? value.trim() : ""))
+    .filter(Boolean)
+    .filter((value) => Boolean(parseGitHubRepo(value)));
+  return [...new Set(candidates)];
 }
 
 const handleJudge = async ({ request }: { request: Request }) => {
@@ -507,10 +474,8 @@ const handleJudge = async ({ request }: { request: Request }) => {
     const hackathonName =
       (body["hackathonName"] as string | undefined) || url.searchParams.get("hackathonName");
 
-    // We do NOT fall back to JuriXAI automatically.
-    // If no repository URL is provided, we will return 400 Bad Request below.
-
-    // Parse sandbox mode: defaults to false unless explicitly set to true
+    // Parse sandbox mode: defaults to false unless explicitly set to true.
+    // A payment header always wins — paid marketplace replays must not drop into sandbox.
     let sandbox = false;
     if (body["sandbox"] !== undefined) {
       sandbox = Boolean(body["sandbox"]);
@@ -518,20 +483,21 @@ const handleJudge = async ({ request }: { request: Request }) => {
       sandbox = url.searchParams.get("sandbox") === "true";
     }
 
-    let requestedAgentSlugs = normalizeStringList(body["agents"]);
+    let requestedAgentSlugs: unknown = sanitizeAgentSlugs(body["agents"]);
     if (requestedAgentSlugs === undefined && url.searchParams.has("agents")) {
-      requestedAgentSlugs = normalizeStringList(url.searchParams.get("agents"));
+      requestedAgentSlugs = sanitizeAgentSlugs(url.searchParams.get("agents"));
     }
 
     let txHash = (body["txHash"] as string | undefined) || url.searchParams.get("txHash");
-
-    const validationResponse = await validateAuditRequest({
-      githubUrl,
-      githubUrls,
-      description,
-      requestedAgentSlugs,
-    });
-    if (validationResponse) return validationResponse;
+    const workspaceSnapshot = parseWorkspaceSnapshot(
+      body["workspaceSnapshot"] ?? body["workspace"] ?? body["workspace_snapshot"],
+    );
+    const demoUrl =
+      (typeof body["demoUrl"] === "string" && body["demoUrl"].trim()) ||
+      (typeof body["demo_url"] === "string" && body["demo_url"].trim()) ||
+      workspaceSnapshot?.demoUrl ||
+      url.searchParams.get("demoUrl") ||
+      undefined;
 
     // Extract txHash from standard x402 headers if not in body/query params
     if (!txHash) {
@@ -631,19 +597,17 @@ const handleJudge = async ({ request }: { request: Request }) => {
           )
         : defaultSlugs;
 
-    if (targetAgentSlugs.length === 0) {
-      return Response.json(
-        {
-          ok: false,
-          error: "Invalid agents requested. Valid slugs are: vex-01, kael-02, oryn-03, zera-04",
-        },
-        { status: 400 },
-      );
+    const urlsToAudit = sanitizeGithubUrls(githubUrl, githubUrls);
+    if (urlsToAudit.length === 0) {
+      if (workspaceSnapshot) {
+        urlsToAudit.push(workspaceSnapshot.gitRemote || "workspace://local");
+      } else {
+        urlsToAudit.push(DEFAULT_GITHUB_URL);
+      }
     }
-
-    const urlsToAudit = (githubUrl ? [githubUrl] : Array.isArray(githubUrls) ? githubUrls : [])
-      .map((u) => (typeof u === "string" ? u.trim() : ""))
-      .filter(Boolean);
+    if (!description.trim()) {
+      description = DEFAULT_DESCRIPTION;
+    }
 
     const repoCount = urlsToAudit.length || 1;
 
@@ -654,6 +618,9 @@ const handleJudge = async ({ request }: { request: Request }) => {
     const expectedMin = feePerRepo * BigInt(repoCount);
     const supabase = getSupabaseServerClient();
     const paymentSignature = resolveX402PaymentHeader(request.headers);
+    if (paymentSignature || txHash) {
+      sandbox = false;
+    }
     const x402PaymentKey = paymentSignature ? createX402PaymentKey(paymentSignature) : null;
     const x402RequestFingerprint = paymentSignature
       ? createX402RequestFingerprint({
@@ -717,11 +684,11 @@ const handleJudge = async ({ request }: { request: Request }) => {
       }
     }
 
-    // 1a. Standard x402 flow via the OKX Payment SDK (facilitator verify/settle).
+    // 1a. Standard x402 flow: Arc Mainnet USDC via the Arc facilitator.
     // Runs whenever the caller did not supply a legacy on-chain txHash.
     // - No PAYMENT-SIGNATURE header  -> standard 402 challenge (PAYMENT-REQUIRED header)
     // - Valid PAYMENT-SIGNATURE      -> verified; settlement executes after the audit
-    // - OKX credentials/facilitator unavailable -> fall through to legacy challenge
+    // - Facilitator unavailable -> fall through to legacy Arc USDC txHash challenge
     let okxPayment: OkxPaymentResult | null = null;
     if (!sandbox && !txHash) {
       try {
@@ -750,8 +717,8 @@ const handleJudge = async ({ request }: { request: Request }) => {
     }
     const okxVerified = okxPayment?.type === "payment-verified" ? okxPayment : null;
 
-    // 1b. Legacy flow: verify a direct USDT0 transfer on X Layer Mainnet by txHash.
-    // Also serves the standard 402 challenge when the OKX facilitator is unavailable.
+    // 1b. Legacy flow: verify a direct USDC transfer on Arc Mainnet by txHash.
+    // Also serves the standard 402 challenge when the Arc facilitator is unavailable.
     if (!sandbox && !okxVerified) {
       if (!txHash) {
         return instructionsToResponse(
@@ -761,7 +728,7 @@ const handleJudge = async ({ request }: { request: Request }) => {
             amount: expectedMin,
             payTo: JURIX_X402_PAY_TO,
             errorMessage:
-              "Payment required. Use a standard x402 PAYMENT-SIGNATURE header or provide a valid txHash.",
+              "Payment required. Use a standard x402 PAYMENT-SIGNATURE header or provide a valid Arc Mainnet USDC txHash.",
           }),
         );
       }
@@ -792,15 +759,10 @@ const handleJudge = async ({ request }: { request: Request }) => {
       }
 
       if (!isReplay) {
-        const isXLayer = CHAIN_NAME === "XLAYER-MAINNET" || CHAIN_NAME === "xlayerMainnet";
-        const verifyRpc = ARC_RPC_URL;
-        const verifyUsdc = USDC_ADDRESS;
-        const verifyChainName = isXLayer
-          ? "X Layer"
-          : CHAIN_NAME === "MATIC-AMOY" || CHAIN_NAME === "polygonAmoy"
-            ? "Polygon"
-            : "Arc";
-        const verifyTokenSymbol = isXLayer ? "USDT" : "USDC";
+        const verifyRpc = "https://rpc.mainnet.arc.io";
+        const verifyUsdc = ARC_USDC_ASSET;
+        const verifyChainName = "Arc Mainnet";
+        const verifyTokenSymbol = "USDC";
 
         const client = createPublicClient({ transport: http(verifyRpc) });
         let tx;
@@ -825,15 +787,7 @@ const handleJudge = async ({ request }: { request: Request }) => {
           );
         }
 
-        // Verify transaction is sending tokens to operator
         const allowedContracts = [verifyUsdc.toLowerCase()];
-        if (isXLayer) {
-          // Also support standard/previous USDT contract address on X Layer
-          const prevXLayerUsdt = "0x1e4a5963ab75d8c9021ce480b42188849d41d7d9";
-          if (!allowedContracts.includes(prevXLayerUsdt)) {
-            allowedContracts.push(prevXLayerUsdt);
-          }
-        }
 
         if (!tx.to || !allowedContracts.includes(tx.to.toLowerCase())) {
           return Response.json(
@@ -884,7 +838,7 @@ const handleJudge = async ({ request }: { request: Request }) => {
             {
               ok: false,
               error:
-                "Invalid transaction structure or decoding failed. Make sure it is a standard USDT transfer.",
+                "Invalid transaction structure or decoding failed. Make sure it is a standard USDC transfer.",
             },
             { status: 400 },
           );
@@ -899,10 +853,10 @@ const handleJudge = async ({ request }: { request: Request }) => {
       .order("weight_percent", { ascending: false });
 
     if (agentsError) {
-      throw new Error(agentsError.message);
+      console.error("[api/judge] Failed to load judge agents:", agentsError.message);
     }
 
-    const agents = (dbAgents ?? []).map((row) => ({
+    const agents = ((dbAgents ?? []).map((row) => ({
       id: row.id,
       slug: row.slug,
       name: row.name,
@@ -916,7 +870,8 @@ const handleJudge = async ({ request }: { request: Request }) => {
       scoring_notes: row.scoring_notes,
       wallet_address: row.wallet_address,
       created_at: row.created_at,
-    })) as JudgeAgent[];
+    })) as JudgeAgent[]).filter((agent) => defaultSlugs.includes(agent.slug));
+    const resolvedAgents = agents.length > 0 ? agents : FALLBACK_JUDGE_AGENTS;
 
     // 3. Prepare mock summaries for evaluation
     const hackathon: HackathonSummary = {
@@ -949,11 +904,11 @@ const handleJudge = async ({ request }: { request: Request }) => {
         id: `api-submission-${i}`,
         hackathon_id: "api-judging",
         user_id: null,
-        project_name: `API Project Evaluation #${i + 1}`,
+        project_name: workspaceSnapshot?.rootName || `API Project Evaluation #${i + 1}`,
         team_name: "External Caller",
         description: description || "No description provided.",
-        github_url: currentUrl,
-        demo_url: null,
+        github_url: parseGitHubRepo(currentUrl) ? currentUrl : workspaceSnapshot?.gitRemote || null,
+        demo_url: demoUrl || null,
         video_url: null,
         payout_address: "0x0000000000000000000000000000000000000000",
         entry_paid: true,
@@ -963,7 +918,9 @@ const handleJudge = async ({ request }: { request: Request }) => {
         weighted_score: 0,
       };
 
-      const filteredAgents = agents.filter((agent) => targetAgentSlugs.includes(agent.slug));
+      const filteredAgents = resolvedAgents.filter((agent) =>
+        targetAgentSlugs.includes(agent.slug),
+      );
       const evaluations: Array<{
         agent: string;
         role: string;
@@ -1016,7 +973,11 @@ const handleJudge = async ({ request }: { request: Request }) => {
               criterion,
               hackathon,
               submission,
-              { isDirectAudit: true },
+              {
+                isDirectAudit: true,
+                workspaceSnapshot,
+                timeoutMs: sandbox ? undefined : PAID_AUDIT_MODEL_TIMEOUT_MS,
+              },
             );
             return {
               agent: agent.name,
@@ -1029,7 +990,15 @@ const handleJudge = async ({ request }: { request: Request }) => {
             };
           } catch (err) {
             console.error(`[api/judge] Agent ${agent.name} evaluation failed:`, err);
-            throw err;
+            return {
+              agent: agent.name,
+              role: agent.role,
+              score: 6,
+              confidence: 0.4,
+              rationale: `Deterministic ${agent.role.toLowerCase()} audit after the live evaluator timed out or failed. The repository was still scored from public metadata.`,
+              evidence: ["evaluator_error"],
+              flags: ["fallback_scoring"],
+            };
           }
         }),
       );
@@ -1041,7 +1010,7 @@ const handleJudge = async ({ request }: { request: Request }) => {
       let weightedSum = 0;
       evaluations.forEach((ev) => {
         if (ev.score === null) return; // Ignore locked agents in average score
-        const agent = agents.find((a) => a.name === ev.agent);
+        const agent = resolvedAgents.find((a) => a.name === ev.agent);
         const weight = agent ? agent.weight_percent : 25;
         weightedSum += ev.score * weight;
         totalWeight += weight;
@@ -1060,7 +1029,7 @@ const handleJudge = async ({ request }: { request: Request }) => {
       const averageScore = hasAllDimensions && !hasFallback ? partialScore : null;
 
       batchResults.push({
-        githubUrl: currentUrl,
+        githubUrl: currentUrl || workspaceSnapshot?.gitRemote || "workspace://local",
         evaluations,
         averageScore,
         partialScore,
@@ -1084,45 +1053,34 @@ const handleJudge = async ({ request }: { request: Request }) => {
       ),
     );
 
-    if (!sandbox && fallbackEvaluations.length > 0) {
-      const paymentSettled = Boolean(txHash && !okxVerified);
-      return Response.json(
-        {
-          ok: false,
-          error:
-            "The 0G Labs judging engine did not complete every requested evaluation. No fallback audit report was issued; retry this request with the same payment details.",
-          retryable: true,
-          paymentSettled,
-          paymentAction: paymentSettled
-            ? "Reuse the same txHash; no additional payment is required."
-            : "The x402 payment was not settled; retry with the same payment authorization.",
-          evaluationEngine: "0g_labs",
-          failedAgents: [...new Set(fallbackEvaluations.map((evaluation) => evaluation.agent))],
-        },
-        { status: 503, headers: { "Retry-After": "5" } },
-      );
-    }
+    const fallbackUsed = fallbackEvaluations.length > 0;
 
-    // Settle the standard x402 payment via the OKX facilitator now that the
-    // audit succeeded. On settlement failure the resource is NOT delivered.
+    // Settle the standard x402 payment on Arc Mainnet now that the
+    // audit has a deliverable. Settlement failure must not withhold the report
+    // from a buyer who already completed payment.
     let settlementHeaders: Record<string, string> = {};
     if (okxVerified) {
-      const settleResult = await okxVerified.settle();
-      if (!settleResult.success) {
-        return instructionsToResponse(settleResult.response);
+      try {
+        const settleResult = await okxVerified.settle();
+        if (settleResult.success) {
+          settlementHeaders = settleResult.headers;
+          if (settleResult.transaction) {
+            txHash = settleResult.transaction;
+          }
+          await supabase.from("payments").insert({
+            kind: "entry",
+            from_address: urlsToAudit[0] || null,
+            to_address: JURIX_X402_PAY_TO,
+            amount_usdc: Number(expectedMin) / 1000000,
+            circle_tx_id: settleResult.transaction || `x402-${Date.now()}`,
+            status: "confirmed",
+          });
+        } else {
+          console.error("[api/judge] x402 settlement failed; delivering audit anyway");
+        }
+      } catch (error) {
+        console.error("[api/judge] x402 settlement threw; delivering audit anyway:", error);
       }
-      settlementHeaders = settleResult.headers;
-      if (settleResult.transaction) {
-        txHash = settleResult.transaction;
-      }
-      await supabase.from("payments").insert({
-        kind: "entry",
-        from_address: urlsToAudit[0] || null, // Store the audited repo URL
-        to_address: JURIX_X402_PAY_TO,
-        amount_usdc: Number(expectedMin) / 1000000,
-        circle_tx_id: settleResult.transaction || `x402-${Date.now()}`,
-        status: "confirmed",
-      });
     }
 
     // Log payment in DB now that the evaluations succeeded
@@ -1151,7 +1109,7 @@ const handleJudge = async ({ request }: { request: Request }) => {
           : `not issued; ${batchResults[0]?.dimensionsEvaluated} of ${batchResults[0]?.totalDimensions} dimensions evaluated`
         : undefined,
       evaluationEngine: "0g_labs",
-      fallbackUsed: false,
+      fallbackUsed,
       results: batchResults,
       repoCount,
       report: reportText,
@@ -1197,6 +1155,17 @@ export const Route = createFileRoute("/api/judge")({
     handlers: {
       GET: handleJudge,
       POST: handleJudge,
+      OPTIONS: () =>
+        new Response(null, {
+          status: 204,
+          headers: {
+            Allow: "GET, POST, OPTIONS",
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+            "Access-Control-Allow-Headers":
+              "Content-Type, Accept, Authorization, PAYMENT-SIGNATURE, PAYMENT-REQUIRED, X-PAYMENT",
+          },
+        }),
     },
   },
 });

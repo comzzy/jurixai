@@ -11,12 +11,12 @@ const payload = Buffer.from(
     },
     accepted: {
       scheme: "exact",
-      network: "eip155:196",
+      network: "eip155:5042",
       amount: "1000",
-      asset: "0x779ded0c9e1022225f8e0630b35a9b54be713736",
-      payTo: "0x75f072ea874d3348c593aab9cffec2ee5ff44276",
+      asset: "0x3600000000000000000000000000000000000000",
+      payTo: "0xF7Eed64C05C211ec458903611e5ec5492D399b58",
       maxTimeoutSeconds: 300,
-      extra: { name: "USD₮0", version: "1" },
+      extra: { name: "USDC", version: "2" },
     },
     payload: {
       signature: "0xsignature",

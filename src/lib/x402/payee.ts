@@ -1,5 +1,5 @@
 /**
- * Public receiving address for JuriXAI Auditor payments and platform fees.
- * The corresponding Agentic Wallet key remains inside OKX's TEE.
+ * Public receiving address for JuriXAI Auditor payments and platform fees
+ * on Arc Mainnet USDC.
  */
-export const JURIX_X402_PAY_TO = "0x75f072ea874d3348c593aab9cffec2ee5ff44276" as const;
+export const JURIX_X402_PAY_TO = "0xF7Eed64C05C211ec458903611e5ec5492D399b58" as const;

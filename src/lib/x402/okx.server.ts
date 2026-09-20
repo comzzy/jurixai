@@ -1,15 +1,10 @@
 /**
- * OKX Payment SDK (x402) integration for the JuriXAI Auditor pay-per-call API.
+ * x402 integration for the JuriXAI Auditor pay-per-call API.
  *
- * Uses the official @okxweb3/x402-core resource server with the OKX facilitator
- * (verify + settle) and the EVM "exact" scheme (EIP-3009 transferWithAuthorization)
- * on X Layer Mainnet (eip155:196, USDT0).
- *
- * The OKX.ai marketplace validates the standard 402 challenge in the
- * PAYMENT-REQUIRED response header and pays via the PAYMENT-SIGNATURE request
- * header — both are handled by x402HTTPResourceServer.processHTTPRequest().
+ * Settles EIP-3009 `exact` USDC payments on Arc Mainnet (eip155:5042).
+ * Verify + settle go through an Arc x402 facilitator (Arcus by default),
+ * not the OKX X Layer facilitator.
  */
-import { OKXFacilitatorClient } from "@okxweb3/x402-core";
 import { x402ResourceServer } from "@okxweb3/x402-core/server";
 import { x402HTTPResourceServer } from "@okxweb3/x402-core/http";
 import type {
@@ -21,13 +16,74 @@ import { ExactEvmScheme } from "@okxweb3/x402-evm/exact/server";
 import { resolveX402PaymentHeader } from "@/lib/x402/payment-header";
 import { JURIX_X402_PAY_TO } from "@/lib/x402/payee";
 
-export const XLAYER_NETWORK = "eip155:196" as const;
-export const USDT0_ASSET = "0x779ded0c9e1022225f8e0630b35a9b54be713736";
-export const USDT0_EXTRA = { name: "USD\u20AE0", symbol: "USD\u20AE0", decimals: 6, version: "1" };
+export const ARC_X402_NETWORK = "eip155:5042" as const;
+/** @deprecated Auditor payments settle on Arc Mainnet, not X Layer. */
+export const XLAYER_NETWORK = ARC_X402_NETWORK;
+export const ARC_USDC_ASSET = "0x3600000000000000000000000000000000000000";
+export const ARC_USDC_EXTRA = {
+  name: "USDC",
+  version: "2",
+  assetTransferMethod: "eip3009",
+};
+/** @deprecated Use ARC_USDC_ASSET. */
+export const USDT0_ASSET = ARC_USDC_ASSET;
+/** @deprecated Use ARC_USDC_EXTRA. */
+export const USDT0_EXTRA = ARC_USDC_EXTRA;
 export const JUDGE_PAYMENT_TIMEOUT_SECONDS = 300;
 const FACILITATOR_REQUEST_TIMEOUT_MS = 15_000;
+const DEFAULT_ARC_FACILITATOR_URL = "https://facilitator.arcusnetwork.io";
 
-/** Per-agent pricing in USDT0 minimum units (6 decimals). */
+function facilitatorUrl(): string {
+  return (process.env.JURIX_X402_FACILITATOR_URL ?? DEFAULT_ARC_FACILITATOR_URL).replace(/\/$/, "");
+}
+
+class ArcHttpFacilitatorClient {
+  constructor(private readonly url: string) {}
+
+  async getSupported() {
+    const response = await fetch(`${this.url}/supported`);
+    if (!response.ok) {
+      throw new Error(`Arc facilitator /supported failed (${response.status})`);
+    }
+    return response.json();
+  }
+
+  async verify(paymentPayload: unknown, paymentRequirements: unknown) {
+    const response = await fetch(`${this.url}/verify`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        x402Version: 2,
+        paymentPayload,
+        paymentRequirements,
+      }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok && !("isValid" in data)) {
+      throw new Error(`Arc facilitator /verify failed (${response.status})`);
+    }
+    return data;
+  }
+
+  async settle(paymentPayload: unknown, paymentRequirements: unknown) {
+    const response = await fetch(`${this.url}/settle`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        x402Version: 2,
+        paymentPayload,
+        paymentRequirements,
+      }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok && !("success" in data)) {
+      throw new Error(`Arc facilitator /settle failed (${response.status})`);
+    }
+    return data;
+  }
+}
+
+/** Per-agent pricing in USDC minimum units (6 decimals). */
 export const AGENTS_PRICING: Record<string, bigint> = {
   "vex-01": 250000n, // 0.25 USDT (Engineering)
   "kael-02": 250000n, // 0.25 USDT (Product/UX)
@@ -44,10 +100,14 @@ export const JUDGE_OUTPUT_SCHEMA = {
     bodyType: "json",
     queryParams: {
       properties: {
-        githubUrl: { type: "string", description: "Public GitHub repository URL" },
+        githubUrl: {
+          type: "string",
+          description: "Public GitHub repository URL. Example: https://github.com/octocat/Hello-World",
+        },
         description: {
           type: "string",
-          description: "Project description covering purpose and key features",
+          description:
+            "Project description covering purpose and key features. Example: GitHub Hello World sample repository",
         },
         agents: {
           type: "string",
@@ -58,10 +118,14 @@ export const JUDGE_OUTPUT_SCHEMA = {
     },
     body: {
       properties: {
-        githubUrl: { type: "string", description: "Public GitHub repository URL" },
+        githubUrl: {
+          type: "string",
+          description: "Public GitHub repository URL. Example: https://github.com/octocat/Hello-World",
+        },
         description: {
           type: "string",
-          description: "Project description covering purpose and key features",
+          description:
+            "Project description covering purpose and key features. Example: GitHub Hello World sample repository",
         },
         agents: {
           type: "array",
@@ -113,14 +177,14 @@ export function buildPaymentRequiredResponse(params: {
     accepts: [
       {
         scheme: "exact",
-        network: XLAYER_NETWORK,
-        asset: USDT0_ASSET,
+        network: ARC_X402_NETWORK,
+        asset: ARC_USDC_ASSET,
         amount: params.amount.toString(),
         payTo: params.payTo,
         maxTimeoutSeconds: JUDGE_PAYMENT_TIMEOUT_SECONDS,
-        symbol: "USDT",
+        symbol: "USDC",
         decimals: 6,
-        extra: { ...USDT0_EXTRA },
+        extra: { ...ARC_USDC_EXTRA },
       },
     ],
     extensions: { outputSchema: JUDGE_OUTPUT_SCHEMA },
@@ -140,7 +204,7 @@ export function buildPaymentRequiredResponse(params: {
   };
 }
 
-/** Total price in USDT0 minimum units for the requested agents × repositories. */
+/** Total price in USDC minimum units for the requested agents × repositories. */
 export function computeExpectedAmount({ agentSlugs, repoCount }: JudgeRequestParams): bigint {
   const feePerRepo = agentSlugs.reduce((sum, slug) => sum + (AGENTS_PRICING[slug] || 0n), 0n);
   return feePerRepo * BigInt(Math.max(repoCount, 1));
@@ -172,9 +236,15 @@ function buildRouteConfig(params: JudgeRequestParams) {
   const amount = computeExpectedAmount(params).toString();
   const accepts = {
     scheme: "exact",
-    network: XLAYER_NETWORK,
+    network: ARC_X402_NETWORK,
     payTo: JURIX_X402_PAY_TO,
-    price: { amount, asset: USDT0_ASSET, symbol: "USDT", decimals: 6, extra: { ...USDT0_EXTRA } },
+    price: {
+      amount,
+      asset: ARC_USDC_ASSET,
+      symbol: "USDC",
+      decimals: 6,
+      extra: { ...ARC_USDC_EXTRA },
+    },
     maxTimeoutSeconds: JUDGE_PAYMENT_TIMEOUT_SECONDS,
     symbol: "USDT",
     decimals: 6,
@@ -190,7 +260,7 @@ function buildRouteConfig(params: JudgeRequestParams) {
       body: {
         ok: false,
         error:
-          "Payment required. Retry with a standard x402 PAYMENT-SIGNATURE header (OKX Payment SDK), or pass a txHash of a direct USDT0 transfer, or set sandbox=true for a free preview.",
+          "Payment required. Retry with a standard x402 PAYMENT-SIGNATURE header, or pass a txHash of a direct Arc Mainnet USDC transfer, or set sandbox=true for a free preview.",
         x402Version: 2,
         required: {
           githubUrl: "Public GitHub repository URL",
@@ -203,28 +273,22 @@ function buildRouteConfig(params: JudgeRequestParams) {
 }
 
 /**
- * Lazily create (once) the x402 resource server connected to the OKX facilitator.
- * Returns null when OKX credentials are missing or the facilitator is unreachable,
- * letting the caller fall back to the legacy manual challenge.
+ * Lazily create (once) the x402 resource server connected to the Arc facilitator.
+ * Returns null when the facilitator is unreachable so the caller can still issue
+ * an Arc 402 challenge and accept a direct USDC txHash.
  */
 async function getBaseServer(): Promise<x402ResourceServer | null> {
-  const apiKey = process.env.OKX_API_KEY;
-  const secretKey = process.env.OKX_SECRET_KEY;
-  const passphrase = process.env.OKX_PASSPHRASE;
-  if (!apiKey || !secretKey || !passphrase) return null;
-
-  const facilitatorClient = new OKXFacilitatorClient({ apiKey, secretKey, passphrase });
+  const facilitatorClient = new ArcHttpFacilitatorClient(facilitatorUrl());
   const server = new x402ResourceServer(facilitatorClient).register(
-    XLAYER_NETWORK,
+    ARC_X402_NETWORK,
     new ExactEvmScheme(),
   );
 
-  // Wrap server.initialize() with a 3-second timeout to prevent requests from hanging if the OKX facilitator is slow/unreachable
   let timeoutId: NodeJS.Timeout | undefined;
   const initPromise = server.initialize();
   const timeoutPromise = new Promise<void>((_, reject) => {
     timeoutId = setTimeout(
-      () => reject(new Error("Timeout initializing OKX x402 server (3s limit reached)")),
+      () => reject(new Error("Timeout initializing Arc x402 facilitator (3s limit reached)")),
       3000,
     );
   });
@@ -244,7 +308,7 @@ async function getCachedBaseServer(): Promise<x402ResourceServer | null> {
     // Cache failures for the lifetime of this (serverless) instance so a
     // misconfigured facilitator key doesn't add a doomed round-trip per request.
     httpServerPromise = getBaseServer().catch((err) => {
-      console.error("[x402] OKX facilitator initialization failed:", err);
+      console.error("[x402] Arc facilitator initialization failed:", err);
       return null;
     }) as Promise<x402HTTPResourceServer | null>;
   }
@@ -256,7 +320,7 @@ export type OkxPaymentResult =
   | { type: "payment-error"; response: HTTPResponseInstructions }
   | {
       type: "payment-verified";
-      /** Call after the resource has been produced to settle on-chain via OKX. */
+      /** Call after the resource has been produced to settle on Arc Mainnet. */
       settle: () => Promise<
         | { success: true; headers: Record<string, string>; transaction?: string }
         | { success: false; response: HTTPResponseInstructions }
@@ -267,11 +331,11 @@ export type OkxPaymentResult =
  * Run the standard x402 flow for a judge request.
  *
  * - No PAYMENT-SIGNATURE header → returns the standard 402 challenge
- *   (PAYMENT-REQUIRED header) built by the OKX Payment SDK.
- * - Valid PAYMENT-SIGNATURE → verified with the OKX facilitator; returns a
- *   settle() callback to execute settlement after the audit succeeds.
- * - Missing credentials / facilitator down → { type: "unavailable" } so the
- *   caller can fall back to the legacy challenge.
+ *   (PAYMENT-REQUIRED header) for Arc Mainnet USDC.
+ * - Valid PAYMENT-SIGNATURE → verified with the Arc facilitator; returns a
+ *   settle() callback to execute settlement on Arc after the audit succeeds.
+ * - Facilitator down → { type: "unavailable" } so the caller can fall back
+ *   to the legacy Arc USDC txHash challenge.
  */
 export async function processOkxPayment(
   request: Request,
@@ -302,7 +366,7 @@ export async function processOkxPayment(
     result = await withTimeout(
       httpServer.processHTTPRequest(context),
       FACILITATOR_REQUEST_TIMEOUT_MS,
-      "OKX payment verification timed out",
+      "Arc payment verification timed out",
     );
   } catch (error) {
     console.error("[x402] Payment verification request failed:", error);
@@ -341,7 +405,7 @@ export async function processOkxPayment(
               request: context,
             }),
             FACILITATOR_REQUEST_TIMEOUT_MS,
-            "OKX payment settlement timed out",
+            "Arc payment settlement timed out",
           );
         } catch (error) {
           console.error("[x402] Payment settlement request failed:", error);

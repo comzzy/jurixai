@@ -21,7 +21,7 @@ import {
   History,
 } from "lucide-react";
 import { toast } from "sonner";
-import { CHAIN_NAME } from "@/lib/chain";
+import { CHAIN_NAME, CHAIN_DISPLAY_NAME, TOKEN_SYMBOL } from "@/lib/chain";
 import { JURIX_X402_PAY_TO } from "@/lib/x402/payee";
 
 export const Route = createFileRoute("/playground")({
@@ -61,13 +61,8 @@ type AnalysisResult = {
 };
 
 function Playground() {
-  const isXLayer = CHAIN_NAME === "XLAYER-MAINNET" || CHAIN_NAME === "xlayerMainnet";
-  const tokenSymbol = isXLayer ? "USDT" : "USDC";
-  const networkName = isXLayer
-    ? "X Layer Mainnet"
-    : CHAIN_NAME === "MATIC-AMOY" || CHAIN_NAME === "polygonAmoy"
-      ? "Polygon Amoy"
-      : "Arc Testnet";
+  const tokenSymbol = TOKEN_SYMBOL;
+  const networkName = CHAIN_DISPLAY_NAME;
 
   const [tab, setTab] = useState<"single" | "batch">("single");
   const [githubUrl, setGithubUrl] = useState("");
@@ -543,7 +538,7 @@ function Playground() {
                       >
                         <span className="font-bold block truncate">{agentName}</span>
                         <span className="text-[10px] font-mono opacity-85">
-                          {price.toFixed(3)} USDT
+                          {price.toFixed(3)} {tokenSymbol}
                         </span>
                       </button>
                     );
