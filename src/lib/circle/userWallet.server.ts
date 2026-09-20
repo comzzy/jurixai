@@ -9,6 +9,7 @@
  * userToken, then we create / list the user's wallet with that userToken.
  */
 import { createHash } from "node:crypto";
+import { request as httpsRequest } from "node:https";
 import { createServerFn } from "@tanstack/react-start";
 import { initiateUserControlledWalletsClient } from "@circle-fin/user-controlled-wallets";
 import { createPublicClient, erc20Abi, http, parseUnits } from "viem";
@@ -62,24 +63,50 @@ async function circleFetchJson(
   if (!apiKey) {
     return { status: 0, json: null, text: "CIRCLE_API_KEY missing" };
   }
-  const res = await fetch(`${CIRCLE_LIVE_API}${path}`, {
-    ...init,
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      Accept: "application/json",
-      "Content-Type": "application/json",
-      "User-Agent": CIRCLE_USER_AGENT,
-      ...(init?.headers ?? {}),
-    },
+  const url = new URL(`${CIRCLE_LIVE_API}${path}`);
+  const method = (init?.method ?? "GET").toString().toUpperCase();
+  const body = typeof init?.body === "string" ? init.body : undefined;
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${apiKey}`,
+    Accept: "application/json",
+    "Content-Type": "application/json",
+    "User-Agent": CIRCLE_USER_AGENT,
+  };
+  if (body) headers["Content-Length"] = String(Buffer.byteLength(body));
+
+  const { status, text } = await new Promise<{ status: number; text: string }>((resolve, reject) => {
+    const req = httpsRequest(
+      {
+        protocol: "https:",
+        hostname: url.hostname,
+        port: 443,
+        path: `${url.pathname}${url.search}`,
+        method,
+        headers,
+      },
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on("data", (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
+        res.on("end", () => {
+          resolve({
+            status: res.statusCode ?? 0,
+            text: Buffer.concat(chunks).toString("utf8"),
+          });
+        });
+      },
+    );
+    req.on("error", reject);
+    if (body) req.write(body);
+    req.end();
   });
-  const text = await res.text();
+
   let json: Record<string, unknown> | null = null;
   try {
     json = JSON.parse(text) as Record<string, unknown>;
   } catch {
     json = null;
   }
-  return { status: res.status, json, text };
+  return { status, json, text };
 }
 
 type CreateTransactionInput = Parameters<ReturnType<typeof client>["createTransaction"]>[0];
@@ -146,6 +173,7 @@ export const emailLoginStatus = createServerFn({ method: "GET" }).handler(async 
     chain: CHAIN,
     keyLen: fp.keyLen,
     keySha12: fp.keySha12,
+    keyColonCount: circleApiKey().split(":").length - 1,
     entityStatus,
     entityAppIdPrefix,
     entityMessage,
