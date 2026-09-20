@@ -143,6 +143,29 @@ type LoginCallback = (error: CircleLoginError | undefined, result: CircleLoginRe
 
 let cachedDeviceId: string | null = null;
 let activeLoginCallback: LoginCallback | undefined;
+let loginInFlight = false;
+
+function removeCircleIframe(): void {
+  if (typeof document === "undefined") return;
+  const iframe = document.getElementById("sdkIframe");
+  iframe?.parentNode?.removeChild(iframe);
+}
+
+function extractSession(result: unknown): Session | null {
+  if (!result || typeof result !== "object") return null;
+  const rows: Record<string, unknown>[] = [result as Record<string, unknown>];
+  const root = result as Record<string, unknown>;
+  if (root.data && typeof root.data === "object") rows.push(root.data as Record<string, unknown>);
+  if (root.result && typeof root.result === "object") rows.push(root.result as Record<string, unknown>);
+  for (const row of rows) {
+    const userToken = row.userToken ?? row.user_token;
+    const encryptionKey = row.encryptionKey ?? row.encryption_key;
+    if (typeof userToken === "string" && typeof encryptionKey === "string" && userToken && encryptionKey) {
+      return { userToken, encryptionKey };
+    }
+  }
+  return null;
+}
 
 async function createCircleSdk(onLoginComplete?: LoginCallback): Promise<W3S> {
   if (!APP_ID) throw new Error("Circle App ID is missing (VITE_CIRCLE_APP_ID).");
@@ -178,6 +201,7 @@ async function readDeviceId(sdk: W3S): Promise<string> {
 
 /** Preload Circle's iframe + deviceId while the user types their email. */
 export async function warmCircleLogin(): Promise<void> {
+  if (loginInFlight) return;
   try {
     const sdk = await createCircleSdk();
     await readDeviceId(sdk);
@@ -204,35 +228,60 @@ function handleLoginComplete(
   rejectLogin: (e: Error) => void,
   fallbackMessage: string,
 ): void {
-  if (error) {
-    const rawMsg = error?.message || fallbackMessage;
+  const session = extractSession(result);
+  if (session) {
+    resolveLogin(session);
+    return;
+  }
+  const errObj = error as { message?: string; code?: number } | undefined;
+  if (errObj && errObj.code !== 0 && (errObj.message || errObj.code)) {
+    const rawMsg = errObj.message || fallbackMessage;
+    const lower = rawMsg.toLowerCase();
+    const isRetryableOtp =
+      lower.includes("incorrect") ||
+      lower.includes("invalid otp") ||
+      lower.includes("invalid code") ||
+      lower.includes("expired") && lower.includes("code");
+    // Wrong code: keep the Circle popup open so the user can retry / resend.
+    if (isRetryableOtp) return;
     const isCancel =
-      rawMsg.toLowerCase().includes("cancel") ||
-      rawMsg.toLowerCase().includes("close") ||
-      rawMsg.toLowerCase().includes("dismiss");
+      lower.includes("cancel") ||
+      lower.includes("close") ||
+      lower.includes("dismiss");
     rejectLogin(new Error(isCancel ? "Verification was cancelled by user." : explainCircleLoginError(rawMsg)));
     return;
   }
-  const userToken = result?.userToken ?? result?.data?.userToken;
-  const encryptionKey = result?.encryptionKey ?? result?.data?.encryptionKey;
-  if (!userToken || !encryptionKey) {
-    rejectLogin(new Error("Verification did not return a session."));
-    return;
-  }
-  resolveLogin({ userToken, encryptionKey });
+  rejectLogin(new Error("Verification did not return a session."));
+}
+
+async function applyEmailLoginTokens(sdk: W3S, email: string): Promise<void> {
+  const deviceId = await readDeviceId(sdk);
+  const tok = await emailLoginStart({ data: { email, deviceId } });
+  sdk.updateConfigs(
+    {
+      appSettings: { appId: APP_ID },
+      loginConfigs: {
+        deviceToken: tok.deviceToken,
+        deviceEncryptionKey: tok.deviceEncryptionKey,
+        otpToken: tok.otpToken,
+      },
+    },
+    activeLoginCallback,
+  );
+  hardenCircleIframe();
 }
 
 async function startEmailOtp(sdk: W3S, email: string): Promise<void> {
-  const deviceId = await readDeviceId(sdk);
-  const tok = await emailLoginStart({ data: { email, deviceId } });
-  sdk.updateConfigs({
-    appSettings: { appId: APP_ID },
-    loginConfigs: {
-      deviceToken: tok.deviceToken,
-      deviceEncryptionKey: tok.deviceEncryptionKey,
-      otpToken: tok.otpToken,
-    },
-  });
+  removeCircleIframe();
+  await applyEmailLoginTokens(sdk, email);
+  if (typeof sdk.setOnResendOtpEmail === "function") {
+    sdk.setOnResendOtpEmail(() => {
+      void applyEmailLoginTokens(sdk, email).catch((err) => {
+        // eslint-disable-next-line no-console
+        console.warn("[jurix wallet] resend OTP failed", err);
+      });
+    });
+  }
   hardenCircleIframe();
   sdk.verifyOtp();
   hardenCircleIframe();
@@ -290,6 +339,17 @@ export function runChallenge(sdk: W3S, challengeId: string): Promise<CircleChall
         resolve(result);
       },
     );
+    window.setTimeout(() => {
+      const pinIframe = document.getElementById("sdkIframe") as HTMLIFrameElement | null;
+      if (!pinIframe) return;
+      pinIframe.style.display = "";
+      pinIframe.style.zIndex = "2147483647";
+      pinIframe.style.position = "fixed";
+      pinIframe.style.inset = "0";
+      pinIframe.width = "100%";
+      pinIframe.height = "100%";
+      hardenCircleIframe();
+    }, 400);
   });
 }
 
@@ -322,40 +382,88 @@ export async function emailSignIn(
     resolveLogin = res;
     rejectLogin = rej;
   });
+  let settled = false;
+  const resolveOnce = (s: Session) => {
+    if (settled) return;
+    settled = true;
+    resolveLogin(s);
+  };
+  const rejectOnce = (e: Error) => {
+    if (settled) return;
+    settled = true;
+    rejectLogin(e);
+  };
 
   const sdk = await createCircleSdk((error, result) =>
-    handleLoginComplete(error, result, resolveLogin, rejectLogin, "Email login failed."),
+    handleLoginComplete(error, result, resolveOnce, rejectOnce, "Email login failed."),
   );
 
+  const onCircleMessage = (event: MessageEvent) => {
+    const origin = String(event.origin || "");
+    if (!origin.includes("circle.com")) return;
+    const data = event.data as Record<string, unknown> | null;
+    const verified = data?.onEmailLoginVerified as { result?: unknown; error?: unknown } | undefined;
+    if (!verified) return;
+    handleLoginComplete(
+      verified.error as CircleLoginError | undefined,
+      verified.result as CircleLoginResult | undefined,
+      resolveOnce,
+      rejectOnce,
+      "Email login failed.",
+    );
+  };
+  if (typeof window !== "undefined") {
+    window.addEventListener("message", onCircleMessage);
+  }
+
   onStatusUpdate?.("sending_otp");
-  await startEmailOtp(sdk, email);
-  onStatusUpdate?.("awaiting_otp");
+  loginInFlight = true;
+  try {
+    await startEmailOtp(sdk, email);
+    onStatusUpdate?.("awaiting_otp");
 
-  const session = await loginDone;
+    const session = await Promise.race([
+      loginDone,
+      new Promise<Session>((_, rej) => {
+        window.setTimeout(() => {
+          rej(
+            new Error(
+              "Circle did not finish email verification. Allow third-party cookies for [*.]circle.com, then try again.",
+            ),
+          );
+        }, 180000);
+      }),
+    ]);
 
-  onStatusUpdate?.("verifying_wallet");
-  // First-time users have no wallet yet. Reuse THIS sdk instance for the PIN
-  // ceremony — Circle's W3SSdk is a singleton, and a second `new W3SSdk()`
-  // plus removing the iframe leaves the PIN screen blank on Chrome.
-  const prov = await provisionWallet({ data: { userToken: session.userToken, email } });
-  let address = prov.address ?? "";
-  if (!address && prov.challengeId) {
-    onStatusUpdate?.("awaiting_pin");
-    sdk.setAuthentication({
-      userToken: session.userToken,
-      encryptionKey: session.encryptionKey,
-    });
-    hardenCircleIframe();
-    await runChallenge(sdk, prov.challengeId);
+    onStatusUpdate?.("verifying_wallet");
+    // First-time users have no wallet yet. Reuse THIS sdk instance for the PIN
+    // ceremony — Circle's W3SSdk is a singleton, and a second `new W3SSdk()`
+    // plus removing the iframe leaves the PIN screen blank on Chrome.
+    const prov = await provisionWallet({ data: { userToken: session.userToken, email } });
+    let address = prov.address ?? "";
+    if (!address && prov.challengeId) {
+      onStatusUpdate?.("awaiting_pin");
+      sdk.setAuthentication({
+        userToken: session.userToken,
+        encryptionKey: session.encryptionKey,
+      });
+      hardenCircleIframe();
+      await runChallenge(sdk, prov.challengeId);
 
-    onStatusUpdate?.("polling_address");
-    address = await waitForWalletAddress(session.userToken, 45);
+      onStatusUpdate?.("polling_address");
+      address = await waitForWalletAddress(session.userToken, 45);
+    }
+
+    if (!address) {
+      throw new Error("Wallet not ready yet — please try signing in again.");
+    }
+    return { identifier: email, address, chain: CHAIN, authMethod: "email" };
+  } finally {
+    loginInFlight = false;
+    if (typeof window !== "undefined") {
+      window.removeEventListener("message", onCircleMessage);
+    }
   }
-
-  if (!address) {
-    throw new Error("Wallet not ready yet — please try signing in again.");
-  }
-  return { identifier: email, address, chain: CHAIN, authMethod: "email" };
 }
 
 /**

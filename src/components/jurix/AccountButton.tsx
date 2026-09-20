@@ -217,7 +217,7 @@ export function AccountButton() {
                       if (status === "awaiting_otp") {
                         // Close our dialog so Chrome can focus Circle's OTP iframe.
                         setOpen(false);
-                        toast.loading("Email sent! Enter the verification code in the popup...", { id: tid });
+                        toast.loading("Email sent. Enter the code in the Circle window, then set a 6-digit PIN if asked.", { id: tid });
                       } else if (status === "verifying_wallet") {
                         toast.loading("Connecting wallet session...", { id: tid });
                       } else if (status === "awaiting_pin") {
