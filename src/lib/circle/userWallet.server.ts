@@ -96,6 +96,11 @@ export const emailLoginStart = createServerFn({ method: "POST" })
       const anyErr = err as { response?: { data?: { message?: string; code?: number } }; message?: string };
       const circleMessage = anyErr.response?.data?.message || anyErr.message || "Circle email login failed";
       const code = anyErr.response?.data?.code;
+      if (code === 155150 || /smtp/i.test(circleMessage)) {
+        throw new Error(
+          "Circle login failed (155150): SMTP is not configured on the Live User-Controlled Wallets app. In Circle Console open Wallets → User Controlled → Configurator → Authentication Methods → Email and save SMTP, then try email login again.",
+        );
+      }
       throw new Error(code ? `Circle login failed (${code}): ${circleMessage}` : `Circle login failed: ${circleMessage}`);
     }
   });

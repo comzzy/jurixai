@@ -9,7 +9,7 @@
 
 const CLIENT_KEY = import.meta.env.VITE_CIRCLE_CLIENT_KEY as string | undefined;
 const CLIENT_URL = import.meta.env.VITE_CIRCLE_CLIENT_URL as string | undefined;
-const CHAIN = (import.meta.env.VITE_CIRCLE_CHAIN as string | undefined) || "polygonAmoy";
+const CHAIN = (import.meta.env.VITE_CIRCLE_CHAIN as string | undefined) || "ARC";
 
 import type { AuthMethod } from "@/lib/account/types";
 
@@ -25,7 +25,7 @@ export function isWalletConfigured(): boolean {
   return Boolean(CLIENT_KEY && CLIENT_URL);
 }
 
-/** The chain new wallets are created on (e.g. "polygonAmoy"). */
+/** The chain new passkey wallets are created on. */
 export function walletChain(): string {
   return CHAIN;
 }

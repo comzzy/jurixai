@@ -8,10 +8,10 @@ import { emailLoginStatus } from "@/lib/circle/userWallet.server";
 import {
   explainCircleLoginError,
   isEmailLoginConfigured,
-  userWalletChain,
   warmCircleLogin,
 } from "@/lib/circle/userWallet";
-import { isWalletConfigured, walletChain } from "@/lib/circle/wallet";
+import { isWalletConfigured } from "@/lib/circle/wallet";
+import { CHAIN_DISPLAY_NAME } from "@/lib/chain";
 import { truncateAddr } from "@/lib/format";
 import logoUrl from "@/assets/jurixai-logo.png";
 
@@ -310,7 +310,7 @@ export function AccountButton() {
           )}
 
           <p className="mt-5 text-center text-[10px] font-mono uppercase tracking-widest text-muted-foreground">
-            {step === "passkey" ? `Passkey on ${walletChain()}` : `Gasless on ${userWalletChain()}`} ·
+            {step === "passkey" ? `Passkey on ${CHAIN_DISPLAY_NAME}` : `Gasless on ${CHAIN_DISPLAY_NAME}`} ·
             {" "}Secured by Circle
           </p>
 

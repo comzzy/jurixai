@@ -10,7 +10,7 @@
 import { emailLoginStart, provisionWallet, listUserWallets } from "./userWallet.server";
 import type { CircleWallet } from "./wallet";
 import { toast } from "sonner";
-import { CIRCLE_CHAIN_CODE } from "@/lib/chain";
+import { CHAIN_DISPLAY_NAME, CIRCLE_CHAIN_CODE } from "@/lib/chain";
 import { circleAppId } from "./appId";
 
 const APP_ID = circleAppId();
@@ -21,7 +21,7 @@ export function isEmailLoginConfigured(): boolean {
 }
 
 export function userWalletChain(): string {
-  return CHAIN;
+  return CHAIN_DISPLAY_NAME;
 }
 
 export interface Session {
@@ -121,7 +121,14 @@ export function explainCircleLoginError(err: unknown): string {
   ) {
     return `Chrome blocked the Circle login window. ${CHROME_LOGIN_HELP}`;
   }
-  if (lower.includes("invalid credentials") || lower.includes("unauthorized") || lower.includes("401")) {
+  if (lower.includes("155150") || lower.includes("smtp")) {
+    return "Circle email login is not set up yet. In Circle Console open Wallets → User Controlled → Configurator → Authentication Methods → Email, add SMTP (From address, host, port, username, password), save, then try again.";
+  }
+  if (
+    /\binvalid credentials\b/.test(lower) ||
+    /\bunauthorized\b/.test(lower) ||
+    /\b401\b/.test(lower)
+  ) {
     return "Circle rejected the login key (invalid credentials). The live App ID and LIVE API key must belong to the same User-Controlled Wallets app. Refresh and try email login again.";
   }
   return raw;

@@ -17,8 +17,6 @@ import { resolveX402PaymentHeader } from "@/lib/x402/payment-header";
 import { JURIX_X402_PAY_TO } from "@/lib/x402/payee";
 
 export const ARC_X402_NETWORK = "eip155:5042" as const;
-/** @deprecated Auditor payments settle on Arc Mainnet, not X Layer. */
-export const XLAYER_NETWORK = ARC_X402_NETWORK;
 export const ARC_USDC_ASSET = "0x3600000000000000000000000000000000000000";
 export const ARC_USDC_EXTRA = {
   name: "USDC",
