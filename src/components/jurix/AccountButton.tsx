@@ -5,7 +5,12 @@ import { toast } from "sonner";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { useWallet } from "@/lib/circle/useWallet";
 import { emailLoginStatus } from "@/lib/circle/userWallet.server";
-import { isEmailLoginConfigured, userWalletChain } from "@/lib/circle/userWallet";
+import {
+  explainCircleLoginError,
+  isEmailLoginConfigured,
+  userWalletChain,
+  warmCircleLogin,
+} from "@/lib/circle/userWallet";
 import { isWalletConfigured, walletChain } from "@/lib/circle/wallet";
 import { truncateAddr } from "@/lib/format";
 import logoUrl from "@/assets/jurixai-logo.png";
@@ -35,7 +40,9 @@ export function AccountButton() {
         setServerError(
           status.configured
             ? null
-            : "Circle email login is not fully configured on the server. Add CIRCLE_API_KEY in Vercel.",
+            : status.apiKeyKind === "TEST"
+              ? "Server is still using Circle TEST keys. Production login needs the LIVE API key."
+              : "Circle email login is not fully configured on the server. Add CIRCLE_API_KEY (LIVE) in Vercel.",
         );
       } catch (err) {
         if (cancelled) return;
@@ -43,6 +50,10 @@ export function AccountButton() {
         setServerError(err instanceof Error ? err.message : "Failed to verify Circle login setup.");
       }
     })();
+
+    // Start Circle's iframe + deviceId while the user types their email.
+    // Chrome drops the click "user gesture" if we wait until after the click.
+    void warmCircleLogin();
 
     return () => {
       cancelled = true;
@@ -196,11 +207,12 @@ export function AccountButton() {
               <button
                 disabled={busy || !email.trim() || !configured || serverReady === null}
                 onClick={async () => {
-                  setOpen(false);
                   const tid = toast.loading("Sending verification email...");
                   try {
                     await loginEmail(email.trim().toLowerCase(), (status: string) => {
                       if (status === "awaiting_otp") {
+                        // Close our dialog so Chrome can focus Circle's OTP iframe.
+                        setOpen(false);
                         toast.loading("Email sent! Enter the verification code in the popup...", { id: tid });
                       } else if (status === "verifying_wallet") {
                         toast.loading("Connecting wallet session...", { id: tid });
@@ -214,13 +226,13 @@ export function AccountButton() {
                       id: tid,
                       description: "Your Circle wallet is connected.",
                     });
-                    // Force a full reload to the profile dashboard to completely bypass any SPA route caching
                     window.location.href = "/profile";
                   } catch (err) {
-                    const msg = err instanceof Error ? err.message : "Email login failed";
+                    const msg = explainCircleLoginError(err);
                     toast.error("Login failed", {
                       id: tid,
                       description: msg,
+                      duration: 16000,
                     });
                   }
                 }}
@@ -302,8 +314,10 @@ export function AccountButton() {
             {" "}Secured by Circle
           </p>
 
-          <div className="mt-4 rounded-lg border border-border bg-muted/30 p-2.5 text-[10px] text-muted-foreground leading-relaxed">
-            💡 <strong>PC Chrome & Safari users:</strong> If you see an "Account/wallet error" or if getDeviceId fails, your browser may be blocking third-party cookies. Please enable third-party cookies in Chrome settings, or use <strong>Brave Browser</strong> for a smooth experience.
+          <div className="mt-4 rounded-lg border border-border bg-muted/30 p-2.5 text-[11px] text-muted-foreground leading-relaxed">
+            Chrome on a computer: if login gets stuck, allow cookies for Circle. Open Settings → Privacy
+            and security → Third-party cookies → Allow (or add{" "}
+            <span className="font-mono">[*.]circle.com</span>), then refresh this page.
           </div>
         </DialogContent>
       </Dialog>

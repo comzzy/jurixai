@@ -53,10 +53,20 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function circleKeyKind(): "LIVE" | "TEST" | "MISSING" | "OTHER" {
+  const key = process.env.CIRCLE_API_KEY?.trim() ?? "";
+  if (!key) return "MISSING";
+  if (key.startsWith("LIVE_API_KEY")) return "LIVE";
+  if (key.startsWith("TEST_API_KEY")) return "TEST";
+  return "OTHER";
+}
+
 /** Report whether the server has the minimum config required for email login. */
 export const emailLoginStatus = createServerFn({ method: "GET" }).handler(async () => ({
-  configured: Boolean(process.env.CIRCLE_API_KEY?.trim()),
-  apiKeyConfigured: Boolean(process.env.CIRCLE_API_KEY?.trim()),
+  configured: circleKeyKind() === "LIVE",
+  apiKeyConfigured: circleKeyKind() !== "MISSING",
+  apiKeyKind: circleKeyKind(),
+  circleEnv: (process.env.CIRCLE_ENV ?? "").trim() || "unset",
   chain: CHAIN,
 }));
 
@@ -64,17 +74,30 @@ export const emailLoginStatus = createServerFn({ method: "GET" }).handler(async 
 export const emailLoginStart = createServerFn({ method: "POST" })
   .validator((d: { email: string; deviceId: string }) => d)
   .handler(async ({ data }) => {
-    const res = await client().createDeviceTokenForEmailLogin({
-      deviceId: data.deviceId,
-      email: data.email,
-    });
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const d = res.data as any;
-    return {
-      deviceToken: d.deviceToken as string,
-      deviceEncryptionKey: d.deviceEncryptionKey as string,
-      otpToken: d.otpToken as string | undefined,
-    };
+    const kind = circleKeyKind();
+    if (kind !== "LIVE") {
+      throw new Error(
+        `Circle login is not using the LIVE API key (server has ${kind}). Set CIRCLE_API_KEY=LIVE_API_KEY:... on Vercel production.`,
+      );
+    }
+    try {
+      const res = await client().createDeviceTokenForEmailLogin({
+        deviceId: data.deviceId,
+        email: data.email,
+      });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const d = res.data as any;
+      return {
+        deviceToken: d.deviceToken as string,
+        deviceEncryptionKey: d.deviceEncryptionKey as string,
+        otpToken: d.otpToken as string | undefined,
+      };
+    } catch (err) {
+      const anyErr = err as { response?: { data?: { message?: string; code?: number } }; message?: string };
+      const circleMessage = anyErr.response?.data?.message || anyErr.message || "Circle email login failed";
+      const code = anyErr.response?.data?.code;
+      throw new Error(code ? `Circle login failed (${code}): ${circleMessage}` : `Circle login failed: ${circleMessage}`);
+    }
   });
 
 /** Ensure the logged-in user has a wallet; create one if not. */
