@@ -57,7 +57,7 @@ function client() {
 
 async function circleFetchJson(
   path: string,
-  init?: RequestInit,
+  init?: RequestInit & { extraHeaders?: Record<string, string> },
 ): Promise<{ status: number; json: Record<string, unknown> | null; text: string }> {
   const apiKey = circleApiKey();
   if (!apiKey) {
@@ -71,6 +71,7 @@ async function circleFetchJson(
     Accept: "application/json",
     "Content-Type": "application/json",
     "User-Agent": CIRCLE_USER_AGENT,
+    ...(init?.extraHeaders ?? {}),
   };
   if (body) headers["Content-Length"] = String(Buffer.byteLength(body));
 
@@ -108,8 +109,6 @@ async function circleFetchJson(
   }
   return { status, json, text };
 }
-
-type CreateTransactionInput = Parameters<ReturnType<typeof client>["createTransaction"]>[0];
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -330,43 +329,45 @@ export const createWithdrawalTransaction = createServerFn({ method: "POST" })
       );
     }
 
-    const amountText = Number(data.amount).toFixed(6).replace(/\.?0+$/, "") || "0";
-    const blockchainParam = CHAIN as NonNullable<CreateTransactionInput["blockchain"]>;
-    const txParams: CreateTransactionInput = {
-      userToken: data.userToken,
+    const dest = data.recipientAddress.trim();
+    if (!/^0x[0-9a-fA-F]{40}$/.test(dest)) {
+      throw new Error("Recipient must be a 0x address (40 hex characters) on Arc Mainnet.");
+    }
+    const amountText = Number(data.amount).toFixed(6);
+    // Circle: tokenId XOR (blockchain + tokenAddress). Native Arc USDC uses tokenId
+    // or blockchain with an empty tokenAddress — never both families at once.
+    const body: Record<string, unknown> = {
       idempotencyKey: crypto.randomUUID(),
       walletId,
+      destinationAddress: dest.toLowerCase(),
       amounts: [amountText],
-      destinationAddress: data.recipientAddress,
-      tokenAddress: USDC_ADDRESS,
-      blockchain: blockchainParam,
-      fee: {
-        type: "level",
-        config: {
-          feeLevel: "LOW",
-        },
-      },
+      feeLevel: "MEDIUM",
     };
-    if (tokenId) txParams.tokenId = tokenId;
-
-    try {
-      const res = await c.createTransaction(txParams);
-      return { challengeId: res.data?.challengeId ?? null };
-    } catch (err) {
-      const anyErr = err as {
-        message?: string;
-        code?: number;
-        response?: { data?: { message?: string; code?: number } };
-      };
-      const circleMessage =
-        anyErr.response?.data?.message || anyErr.message || "Circle transfer failed";
-      const code = anyErr.response?.data?.code ?? anyErr.code;
-      throw new Error(
-        code
-          ? `Circle transfer failed (${code}): ${circleMessage}`
-          : `Circle transfer failed: ${circleMessage}`,
-      );
+    if (tokenId) {
+      body.tokenId = tokenId;
+    } else {
+      body.blockchain = CHAIN;
     }
+
+    const probe = await circleFetchJson("/v1/w3s/user/transactions/transfer", {
+      method: "POST",
+      body: JSON.stringify(body),
+      extraHeaders: { "X-User-Token": data.userToken },
+    });
+    const payload = probe.json?.data as { challengeId?: string } | undefined;
+    if (probe.status >= 200 && probe.status < 300 && payload?.challengeId) {
+      return { challengeId: payload.challengeId };
+    }
+    const { code, message } = circleErrorMessage(
+      probe.json,
+      probe.text,
+      "Circle transfer failed",
+    );
+    throw new Error(
+      code
+        ? `Circle transfer failed (${code}): ${message}`
+        : `Circle transfer failed (HTTP ${probe.status}): ${message}`,
+    );
   });
 
 export const waitForFundingTransaction = createServerFn({ method: "POST" })
