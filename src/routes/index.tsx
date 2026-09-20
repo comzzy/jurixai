@@ -36,7 +36,7 @@ function Home() {
         <div className="max-w-4xl">
           <div className="inline-flex items-center gap-2 rounded-full border border-border bg-muted px-3 py-1 mb-6 text-xs font-medium text-muted-foreground">
             <span className="size-1.5 rounded-full bg-accent animate-pulse-dot" />
-            Four specialized AI judges, scoring live
+            Four specialized AI judges, scoring now live on Arc Mainnet
           </div>
           <h1 className="font-semibold italic text-3xl md:text-4xl lg:text-5xl tracking-tight leading-[1.1] text-balance mb-6">
             Host a hackathon. <span className="text-muted-foreground">AI agents judge it.</span>{" "}
