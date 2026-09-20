@@ -11,9 +11,17 @@
 import { createServerFn } from "@tanstack/react-start";
 import { initiateUserControlledWalletsClient } from "@circle-fin/user-controlled-wallets";
 import { createPublicClient, erc20Abi, http, parseUnits } from "viem";
-import { ARC_RPC_URL, USDC_ADDRESS, USDC_DECIMALS, CHAIN_NAME, activeChain } from "@/lib/chain";
+import {
+  ARC_RPC_URL,
+  USDC_ADDRESS,
+  USDC_DECIMALS,
+  CIRCLE_CHAIN_CODE,
+  CHAIN_DISPLAY_NAME,
+  IS_TESTNET,
+  activeChain,
+} from "@/lib/chain";
 
-const CHAIN = process.env.CIRCLE_CHAIN || "ARC-TESTNET";
+const CHAIN = CIRCLE_CHAIN_CODE;
 
 function client() {
   const apiKey = process.env.CIRCLE_API_KEY;
@@ -98,6 +106,16 @@ export const provisionWallet = createServerFn({ method: "POST" })
     // First-time user: no PIN and no wallet yet. createUserPinWithWallets sets a
     // PIN and creates the wallet(s) in one challenge (createWallet alone assumes a
     // PIN already exists, which is why the old flow hung on first login).
+    const circleEnv = (process.env.CIRCLE_ENV ?? "").trim().toLowerCase();
+    const apiKey = process.env.CIRCLE_API_KEY ?? "";
+    const isLiveCircle =
+      circleEnv === "production" || apiKey.startsWith("LIVE_API_KEY");
+    if (!IS_TESTNET && !isLiveCircle) {
+      throw new Error(
+        `Circle sandbox cannot create wallets on ${CHAIN_DISPLAY_NAME}. Set CIRCLE_ENV=production and use production Circle API keys.`,
+      );
+    }
+
     const created = await c.createUserPinWithWallets({
       userToken: data.userToken,
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -166,9 +184,7 @@ export const createWithdrawalTransaction = createServerFn({ method: "POST" })
       txParams.tokenId = tokenId;
     } else {
       // Fallback: pass tokenAddress and blockchain
-      const blockchainParam = (
-        CHAIN_NAME === "polygonAmoy" ? "MATIC-AMOY" : CHAIN_NAME
-      ) as NonNullable<CreateTransactionInput["blockchain"]>;
+      const blockchainParam = CHAIN as NonNullable<CreateTransactionInput["blockchain"]>;
       txParams.tokenAddress = USDC_ADDRESS;
       txParams.blockchain = blockchainParam;
     }

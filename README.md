@@ -1,6 +1,6 @@
 # JuriXAI ⚖️
 
-JuriXAI is an on-chain hackathon hosting platform built for the Lepton Agents Hackathon. It replaces human judges with a panel of AI agents, using USDC micropayments on Arc L1 Testnet to pay agents for evaluations and distribute prize pools to winners.
+JuriXAI is an on-chain hackathon hosting platform built for the Lepton Agents Hackathon. It replaces human judges with a panel of AI agents, using USDC micropayments on **Arc Mainnet** to pay agents for evaluations and distribute prize pools to winners.
 
 The platform uses Circle Smart Accounts (SCA) to provide developer and organizer wallets.
 
@@ -24,8 +24,13 @@ SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
 # Circle
 CIRCLE_API_KEY=your-circle-api-key
 VITE_CIRCLE_APP_ID=your-circle-app-id
-VITE_CIRCLE_CHAIN=ARC-TESTNET
-CIRCLE_CHAIN=ARC-TESTNET
+VITE_CIRCLE_CHAIN=ARC
+CIRCLE_CHAIN=ARC
+CIRCLE_ENV=production
+# VITE_ARC_RPC_URL=https://rpc.mainnet.arc.io
+# VITE_ARC_EXPLORER=https://explorer.arc.io
+# VITE_ARC_CHAIN_ID=5042
+VITE_ESCROW_CONTRACT_ADDRESS=0x95cdf46917ffcB741BD3214eD59a8cF02AF47ae5
 
 # Session
 JURIX_SESSION_SECRET=some-random-secret-key
@@ -42,10 +47,12 @@ JURIX_JUDGE_MODEL=glm-5.1
 ```
 
 ## Smart Contract Escrow (JuriXEscrow)
-The platform uses a master escrow contract deployed on **Arc Testnet** at:
-`0x89db74b925f694ebec1118cff9b08a1afe528785`
+The live escrow is **JuriXEscrow v2** on **Arc Mainnet** (chain ID `5042`):
+[`0x95cdf46917ffcB741BD3214eD59a8cF02AF47ae5`](https://explorer.arc.io/address/0x95cdf46917ffcB741BD3214eD59a8cF02AF47ae5)
 
-The Solidity source code for the escrow is located at `scripts/deploy-escrow.ts`.
+RPC `https://rpc.mainnet.arc.io`, explorer `https://explorer.arc.io`. USDC (gas + prizes) is `0x3600000000000000000000000000000000000000`. Circle's wallet chain code is `ARC`.
+
+The Solidity source is in `scripts/deploy-escrow-v2.ts`. Deploy scripts refuse mainnet unless the operator has native USDC and you pass `--allow-mainnet`. Testnet funds and the old testnet escrow do not move; staging can still set `CIRCLE_CHAIN=ARC-TESTNET`.
 
 ## Supabase Database Setup
 Create a new SQL query in the Supabase Dashboard and run:
@@ -89,10 +96,27 @@ claude -p --permission-mode acceptEdits "Reply with the single word OK."
 codex exec --sandbox workspace-write "Reply with the single word OK."
 ```
 
+## MCP (Claude, Codex, Cursor, Grok)
+
+Paste this:
+
+```json
+{
+  "mcpServers": {
+    "jurixai": {
+      "url": "https://mcp.jurixai.xyz/mcp"
+    }
+  }
+}
+```
+
+Hosted endpoint: https://mcp.jurixai.xyz/mcp (same app also serves https://www.jurixai.xyz/mcp). Local stdio package lives in `packages/mcp`.
+
 ## 🌐 Browser Compatibility Note (Chrome/Safari/Brave)
-Because Circle's secure wallet SDK relies on cross-origin iframes (`w3s.circle.com`) to manage device authentication and store keys securely:
-*   **Brave Browser (PC):** Works perfectly out-of-the-box on PC. We highly recommend using Brave Browser for a seamless experience.
-*   **Chrome & Safari (PC):** If you experience an "Account/wallet error" or if device registration fails, your browser's **Third-Party Cookie Blocking** settings are likely blocking the SDK from writing to local storage. You can resolve this by allowing third-party cookies for the site in your Chrome/Safari settings.
+Circle login uses a secure window from `pw-auth.circle.com`. Chrome on a computer often blocks that window.
+*   **Chrome (PC):** Settings → Privacy and security → Third-party cookies → Allow third-party cookies (or add `[*.]circle.com`), then refresh. Incognito mode usually fails because Chrome blocks those cookies there.
+*   **Safari (PC):** Allow cookies for Circle, or use Chrome with the setting above.
+*   **Brave:** Usually works. If login fails, allow cookies for `circle.com` in Shields.
 
 ## Quick Demo Flow
 1. **Sign In:** Click "Sign In", input email, verify OTP, and set a PIN. This generates your Circle Smart Account (SCA).

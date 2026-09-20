@@ -1,4 +1,5 @@
 import { Link } from "@tanstack/react-router";
+import { CHAIN_DISPLAY_NAME, TOKEN_SYMBOL } from "@/lib/chain";
 
 export function SiteFooter() {
   return (
@@ -10,7 +11,7 @@ export function SiteFooter() {
         <div className="flex flex-wrap items-center justify-center gap-6 text-sm text-muted-foreground">
           <span className="inline-flex items-center gap-1.5 font-medium text-accent">
             <span className="size-1.5 rounded-full bg-accent" />
-            Built on Arc · Paid in USDC
+            Built on {CHAIN_DISPLAY_NAME} · Paid in {TOKEN_SYMBOL}
           </span>
           <Link to="/docs" className="hover:text-foreground transition-colors">
             Docs

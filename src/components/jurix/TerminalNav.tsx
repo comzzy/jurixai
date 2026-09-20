@@ -3,6 +3,7 @@ import { useState } from "react";
 import { Menu, X } from "lucide-react";
 import { AccountButton } from "./AccountButton";
 import { useWallet } from "@/lib/circle/useWallet";
+import { CHAIN_DISPLAY_NAME, IS_TESTNET } from "@/lib/chain";
 import logoUrl from "@/assets/jurixai-logo.png";
 
 const NAV = [
@@ -36,7 +37,8 @@ export function TerminalNav() {
           <div className="hidden lg:flex items-center gap-5 text-xs font-medium text-muted-foreground">
             <div className="flex items-center gap-2">
               <span className="size-1.5 rounded-full bg-accent animate-pulse-dot" />
-              All systems normal
+              {CHAIN_DISPLAY_NAME}
+              {IS_TESTNET ? " · testnet" : ""}
             </div>
           </div>
         </div>

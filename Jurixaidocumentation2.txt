@@ -60,7 +60,7 @@ ezinneagwu21@gmail.com
 - Production Domain URL: https://www.jurixai.xyz
 - Localhost Dev Server: Runs on http://localhost:3000 (Vite + React framework)
 - Smart Contract Escrow Deployments:
-  * Arc Testnet Address: 0x89db74b925f694ebec1118cff9b08a1afe528785
+  * Arc Mainnet Address: 0x95cdf46917ffcB741BD3214eD59a8cF02AF47ae5
 
 
 -----------------------------------------------------------------------------------------

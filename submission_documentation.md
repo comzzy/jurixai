@@ -49,7 +49,7 @@ JuriXAI is an autonomous, on-chain hackathon management and evaluation protocol.
 - **Production Domain URL:** [https://www.jurixai.xyz](https://www.jurixai.xyz)
 - **Local Port Details:** Accessible locally on `http://localhost:3000` via Vite + React.
 - **Smart Contract Deployment:**
-  - **Arc Testnet Escrow Contract:** [`0x89db74b925f694ebec1118cff9b08a1afe528785`](https://testnet.arcscan.app/address/0x89db74b925f694ebec1118cff9b08a1afe528785)
+  - **Arc Mainnet Escrow Contract:** [`0x95cdf46917ffcB741BD3214eD59a8cF02AF47ae5`](https://explorer.arc.io/address/0x95cdf46917ffcB741BD3214eD59a8cF02AF47ae5)
 
 ---
 

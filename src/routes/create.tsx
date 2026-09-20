@@ -11,6 +11,7 @@ import { useWallet } from "@/lib/circle/useWallet";
 import { readUsdcBalance } from "@/lib/chain";
 import { ShieldAlert } from "lucide-react";
 import type { Session } from "@/lib/circle/userWallet";
+import { circleAppId } from "@/lib/circle/appId";
 
 export const Route = createFileRoute("/create")({
   loader: () => loadHomeData(),
@@ -313,21 +314,15 @@ function CreateHackathon() {
       const { W3SSdk } = await import("@circle-fin/w3s-pw-web-sdk");
       const { runChallenge } = await import("@/lib/circle/userWallet");
 
-      // Clean up the DOM container to ensure the PIN keyboard renders on a fresh iframe
-      if (typeof document !== "undefined") {
-        const existingRoot = document.getElementById("circle-w3s-root");
-        if (existingRoot) existingRoot.remove();
-      }
-
       const sdkChallenge = new W3SSdk({
-        appSettings: { appId: import.meta.env.VITE_CIRCLE_APP_ID },
+        appSettings: { appId: circleAppId() },
       });
       sdkChallenge.setAuthentication({
         userToken: activeSession.userToken,
         encryptionKey: activeSession.encryptionKey,
       });
 
-      // Execute challenge synchronously inside the click handler (bypasses pop-up blocker)
+      // Execute inside the click handler so Chrome keeps the user gesture.
       await runChallenge(sdkChallenge, activeChallengeId);
 
       toast.loading("Payment authorized. Waiting for Circle to settle the USDC transfer...", {

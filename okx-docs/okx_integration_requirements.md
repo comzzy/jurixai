@@ -39,7 +39,7 @@ graph TD
     ClientLib -->|If Chain == XLAYER| OKXSDK[OKX Web3 Wallet / X Layer Scan]
     
     Backend[JurixAI Backend] --> ChainService[Chain Service Adapter]
-    ChainService -->|If Chain == ARC| ArcChain[Arc Testnet Escrow]
+    ChainService -->|If Chain == ARC| ArcChain[Arc Mainnet Escrow]
     ChainService -->|If Chain == XLAYER| XLayerChain[X Layer Escrow]
 ```
 
@@ -47,7 +47,7 @@ graph TD
 1. **Dynamic Network Settings:** 
    In [chain.ts](file:///root/jurixai/repo/src/lib/chain.ts), instead of overriding values, we will define both networks and use an environment variable (e.g. `VITE_ACTIVE_CHAIN`) to decide which network is active, or allow the user to toggle it dynamically in the UI.
 2. **Conditional Smart Contracts:**
-   We will keep the current deployed Arc contract address (`0x89db74b925f694ebec1118cff9b08a1afe528785`) as-is. We will deploy a copy of the same escrow contract to X Layer and add it as a separate configuration.
+   Arc Mainnet escrow is `0x95cdf46917ffcB741BD3214eD59a8cF02AF47ae5`. X Layer uses a separate escrow configuration.
 3. **Modular Payouts:**
    In [judging.server.ts](file:///root/jurixai/repo/src/lib/jurix/judging.server.ts), the function `payAgentForEvaluation` will check which chain is being used and call either the Arc transfer helper (`sendUsdc`) or the OKX Agentic Wallet payment helper.
 

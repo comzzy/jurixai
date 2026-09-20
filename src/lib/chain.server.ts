@@ -4,7 +4,14 @@
  */
 import { createPublicClient, http, erc20Abi, createWalletClient, parseUnits } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import { activeChain, ARC_RPC_URL, USDC_ADDRESS, USDC_DECIMALS, ESCROW_CONTRACT_ADDRESS, escrowAbi } from "./chain";
+import {
+  activeChain,
+  ARC_RPC_URL,
+  USDC_ADDRESS,
+  USDC_DECIMALS,
+  escrowAbi,
+  requireEscrowAddress,
+} from "./chain";
 
 /** Send USDC on the active chain using the operator's private key. */
 export async function sendUsdc(toAddress: string, amountUsdc: number): Promise<string> {
@@ -84,7 +91,7 @@ export async function registerHackathonOnChain(
   const platformFeeBigInt = parseUnits(platformFee.toFixed(6), USDC_DECIMALS);
 
   const hash = await walletClient.writeContract({
-    address: ESCROW_CONTRACT_ADDRESS as `0x${string}`,
+    address: requireEscrowAddress(),
     abi: escrowAbi,
     functionName: "registerHackathon",
     args: [hackathonId, hoster as `0x${string}`, prizePoolBigInt, platformFeeBigInt],
@@ -98,7 +105,7 @@ async function getOnChainId(publicClient: any, hackathonId: string): Promise<str
   if (hackathonId === "kane-hackathon") {
     try {
       const details = await publicClient.readContract({
-        address: ESCROW_CONTRACT_ADDRESS as `0x${string}`,
+        address: requireEscrowAddress(),
         abi: escrowAbi,
         functionName: "hackathons",
         args: [hackathonId],
@@ -106,7 +113,7 @@ async function getOnChainId(publicClient: any, hackathonId: string): Promise<str
       const exists = details[4];
       if (!exists) {
         const emptyDetails = await publicClient.readContract({
-          address: ESCROW_CONTRACT_ADDRESS as `0x${string}`,
+          address: requireEscrowAddress(),
           abi: escrowAbi,
           functionName: "hackathons",
           args: [""],
@@ -153,7 +160,7 @@ export async function disbursePrizesOnChain(
   const amountsBigInt = amounts.map((a) => parseUnits(a.toFixed(6), USDC_DECIMALS));
 
   const hash = await walletClient.writeContract({
-    address: ESCROW_CONTRACT_ADDRESS as `0x${string}`,
+    address: requireEscrowAddress(),
     abi: escrowAbi,
     functionName: "disbursePrizes",
     args: [onChainId, winners as `0x${string}`[], amountsBigInt],
@@ -187,7 +194,7 @@ export async function cancelAndRefundOnChain(hackathonId: string): Promise<strin
   const onChainId = await getOnChainId(publicClient, hackathonId);
 
   const hash = await walletClient.writeContract({
-    address: ESCROW_CONTRACT_ADDRESS as `0x${string}`,
+    address: requireEscrowAddress(),
     abi: escrowAbi,
     functionName: "cancelAndRefund",
     args: [onChainId],
