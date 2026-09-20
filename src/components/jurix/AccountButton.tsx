@@ -42,7 +42,11 @@ export function AccountButton() {
             ? null
             : status.apiKeyKind === "TEST"
               ? "Server is still using Circle TEST keys. Production login needs the LIVE API key."
-              : "Circle email login is not fully configured on the server. Add CIRCLE_API_KEY (LIVE) in Vercel.",
+              : status.entityStatus === 401
+                ? "Circle rejected the LIVE API key from Vercel (401). In Circle Console turn off IP allowlist on that key, then save CIRCLE_API_KEY on Vercel production."
+                : status.entityStatus && status.entityStatus !== 200
+                  ? `Circle entity check failed (HTTP ${status.entityStatus}): ${status.entityMessage}`
+                  : "Circle email login is not fully configured on the server. Add CIRCLE_API_KEY (LIVE) in Vercel.",
         );
       } catch (err) {
         if (cancelled) return;

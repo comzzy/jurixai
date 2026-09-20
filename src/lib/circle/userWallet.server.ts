@@ -8,6 +8,7 @@
  * (Circle emails the OTP), the browser SDK collects the code and returns a
  * userToken, then we create / list the user's wallet with that userToken.
  */
+import { createHash } from "node:crypto";
 import { createServerFn } from "@tanstack/react-start";
 import { initiateUserControlledWalletsClient } from "@circle-fin/user-controlled-wallets";
 import { createPublicClient, erc20Abi, http, parseUnits } from "viem";
@@ -22,6 +23,7 @@ import {
 } from "@/lib/chain";
 
 const CHAIN = CIRCLE_CHAIN_CODE;
+const CIRCLE_LIVE_API = "https://api.circle.com";
 
 function pickWalletOnActiveChain<T extends { blockchain?: string | null; address?: string | null; id?: string | null }>(
   wallets: T[],
@@ -33,18 +35,46 @@ function pickWalletOnActiveChain<T extends { blockchain?: string | null; address
   );
 }
 
+function circleApiKey(): string {
+  return (process.env.CIRCLE_API_KEY ?? "").trim();
+}
+
 function client() {
-  const apiKey = process.env.CIRCLE_API_KEY?.trim();
+  const apiKey = circleApiKey();
   if (!apiKey) {
     throw new Error("CIRCLE_API_KEY is not set on the server (add it in Vercel).");
   }
-  const live =
-    apiKey.startsWith("LIVE_API_KEY") ||
-    (process.env.CIRCLE_ENV ?? "").trim().toLowerCase() === "production";
   return initiateUserControlledWalletsClient({
     apiKey,
-    baseUrl: live ? "https://api.circle.com" : "https://api-sandbox.circle.com",
+    baseUrl: CIRCLE_LIVE_API,
   });
+}
+
+async function circleFetchJson(
+  path: string,
+  init?: RequestInit,
+): Promise<{ status: number; json: Record<string, unknown> | null; text: string }> {
+  const apiKey = circleApiKey();
+  if (!apiKey) {
+    return { status: 0, json: null, text: "CIRCLE_API_KEY missing" };
+  }
+  const res = await fetch(`${CIRCLE_LIVE_API}${path}`, {
+    ...init,
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      Accept: "application/json",
+      "Content-Type": "application/json",
+      ...(init?.headers ?? {}),
+    },
+  });
+  const text = await res.text();
+  let json: Record<string, unknown> | null = null;
+  try {
+    json = JSON.parse(text) as Record<string, unknown>;
+  } catch {
+    json = null;
+  }
+  return { status: res.status, json, text };
 }
 
 type CreateTransactionInput = Parameters<ReturnType<typeof client>["createTransaction"]>[0];
@@ -54,21 +84,68 @@ function sleep(ms: number) {
 }
 
 function circleKeyKind(): "LIVE" | "TEST" | "MISSING" | "OTHER" {
-  const key = process.env.CIRCLE_API_KEY?.trim() ?? "";
+  const key = circleApiKey();
   if (!key) return "MISSING";
   if (key.startsWith("LIVE_API_KEY")) return "LIVE";
   if (key.startsWith("TEST_API_KEY")) return "TEST";
   return "OTHER";
 }
 
+function keyFingerprint(): { keyLen: number; keySha12: string } {
+  const key = circleApiKey();
+  return {
+    keyLen: key.length,
+    keySha12: key ? createHash("sha256").update(key).digest("hex").slice(0, 12) : "",
+  };
+}
+
+function circleErrorMessage(
+  json: Record<string, unknown> | null,
+  text: string,
+  fallback: string,
+): { code: number | undefined; message: string } {
+  const data = json && typeof json === "object" ? json : null;
+  const nested = (data?.data && typeof data.data === "object" ? data.data : null) as Record<
+    string,
+    unknown
+  > | null;
+  const codeRaw = data?.code ?? nested?.code;
+  const code = typeof codeRaw === "number" ? codeRaw : undefined;
+  const message =
+    (typeof data?.message === "string" && data.message) ||
+    (typeof nested?.message === "string" && nested.message) ||
+    text.slice(0, 180) ||
+    fallback;
+  return { code, message };
+}
+
 /** Report whether the server has the minimum config required for email login. */
-export const emailLoginStatus = createServerFn({ method: "GET" }).handler(async () => ({
-  configured: circleKeyKind() === "LIVE",
-  apiKeyConfigured: circleKeyKind() !== "MISSING",
-  apiKeyKind: circleKeyKind(),
-  circleEnv: (process.env.CIRCLE_ENV ?? "").trim() || "unset",
-  chain: CHAIN,
-}));
+export const emailLoginStatus = createServerFn({ method: "GET" }).handler(async () => {
+  const kind = circleKeyKind();
+  const fp = keyFingerprint();
+  let entityStatus = 0;
+  let entityAppIdPrefix = "";
+  let entityMessage = "";
+  if (kind !== "MISSING") {
+    const probe = await circleFetchJson("/v1/w3s/config/entity");
+    entityStatus = probe.status;
+    const data = probe.json?.data as { appId?: string } | undefined;
+    entityAppIdPrefix = (data?.appId ?? "").slice(0, 8);
+    entityMessage = circleErrorMessage(probe.json, probe.text, probe.status === 200 ? "ok" : "entity probe failed").message;
+  }
+  return {
+    configured: kind === "LIVE" && entityStatus === 200,
+    apiKeyConfigured: kind !== "MISSING",
+    apiKeyKind: kind,
+    circleEnv: (process.env.CIRCLE_ENV ?? "").trim() || "unset",
+    chain: CHAIN,
+    keyLen: fp.keyLen,
+    keySha12: fp.keySha12,
+    entityStatus,
+    entityAppIdPrefix,
+    entityMessage,
+  };
+});
 
 /** Mint a device token for email login — triggers Circle to email the OTP code. */
 export const emailLoginStart = createServerFn({ method: "POST" })
@@ -80,29 +157,43 @@ export const emailLoginStart = createServerFn({ method: "POST" })
         `Circle login is not using the LIVE API key (server has ${kind}). Set CIRCLE_API_KEY=LIVE_API_KEY:... on Vercel production.`,
       );
     }
-    try {
-      const res = await client().createDeviceTokenForEmailLogin({
+    const probe = await circleFetchJson("/v1/w3s/users/email/token", {
+      method: "POST",
+      body: JSON.stringify({
+        idempotencyKey: crypto.randomUUID(),
         deviceId: data.deviceId,
         email: data.email,
-      });
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const d = res.data as any;
+      }),
+    });
+    const payload = (probe.json?.data ?? null) as {
+      deviceToken?: string;
+      deviceEncryptionKey?: string;
+      otpToken?: string;
+    } | null;
+    if (probe.status >= 200 && probe.status < 300 && payload?.deviceToken && payload.deviceEncryptionKey) {
       return {
-        deviceToken: d.deviceToken as string,
-        deviceEncryptionKey: d.deviceEncryptionKey as string,
-        otpToken: d.otpToken as string | undefined,
+        deviceToken: payload.deviceToken,
+        deviceEncryptionKey: payload.deviceEncryptionKey,
+        otpToken: payload.otpToken,
       };
-    } catch (err) {
-      const anyErr = err as { response?: { data?: { message?: string; code?: number } }; message?: string };
-      const circleMessage = anyErr.response?.data?.message || anyErr.message || "Circle email login failed";
-      const code = anyErr.response?.data?.code;
-      if (code === 155150 || /smtp/i.test(circleMessage)) {
-        throw new Error(
-          "Circle login failed (155150): SMTP is not configured on the Live User-Controlled Wallets app. In Circle Console open Wallets → User Controlled → Configurator → Authentication Methods → Email and save SMTP, then try email login again.",
-        );
-      }
-      throw new Error(code ? `Circle login failed (${code}): ${circleMessage}` : `Circle login failed: ${circleMessage}`);
     }
+    const { code, message } = circleErrorMessage(probe.json, probe.text, "Circle email login failed");
+    if (code === 155150 || /smtp/i.test(message)) {
+      throw new Error(
+        "Circle login failed (155150): SMTP is not configured on the Live User-Controlled Wallets app. In Circle Console open Wallets → User Controlled → Configurator → Authentication Methods → Email and save SMTP, then try email login again.",
+      );
+    }
+    if (probe.status === 401 || /invalid credentials/i.test(message)) {
+      const fp = keyFingerprint();
+      throw new Error(
+        `Circle login failed (401): Live API rejected the server key (len ${fp.keyLen}, fp ${fp.keySha12}). In Circle Console check the LIVE API key is not IP-restricted, then set that same key as CIRCLE_API_KEY on Vercel production.`,
+      );
+    }
+    throw new Error(
+      code
+        ? `Circle login failed (${code}, HTTP ${probe.status}): ${message}`
+        : `Circle login failed (HTTP ${probe.status}): ${message}`,
+    );
   });
 
 /** Ensure the logged-in user has a wallet; create one if not. */

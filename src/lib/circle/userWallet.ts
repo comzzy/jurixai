@@ -129,7 +129,9 @@ export function explainCircleLoginError(err: unknown): string {
     /\bunauthorized\b/.test(lower) ||
     /\b401\b/.test(lower)
   ) {
-    return "Circle rejected the login key (invalid credentials). The live App ID and LIVE API key must belong to the same User-Controlled Wallets app. Refresh and try email login again.";
+    return raw.includes("fp ")
+      ? raw
+      : "Circle's Live API rejected the server key (401). In Circle Console, open the LIVE API key and turn off IP allowlist (or add Vercel), then paste that same key into Vercel as CIRCLE_API_KEY.";
   }
   return raw;
 }
