@@ -24,6 +24,9 @@ import {
 
 const CHAIN = CIRCLE_CHAIN_CODE;
 const CIRCLE_LIVE_API = "https://api.circle.com";
+/** Circle's edge WAF returns 401/403 for empty or datacenter User-Agents. */
+const CIRCLE_USER_AGENT =
+  "Mozilla/5.0 (compatible; JuriXAI/1.0; +https://www.jurixai.xyz) Chrome/120.0.0.0";
 
 function pickWalletOnActiveChain<T extends { blockchain?: string | null; address?: string | null; id?: string | null }>(
   wallets: T[],
@@ -47,6 +50,7 @@ function client() {
   return initiateUserControlledWalletsClient({
     apiKey,
     baseUrl: CIRCLE_LIVE_API,
+    userAgent: CIRCLE_USER_AGENT,
   });
 }
 
@@ -64,6 +68,7 @@ async function circleFetchJson(
       Authorization: `Bearer ${apiKey}`,
       Accept: "application/json",
       "Content-Type": "application/json",
+      "User-Agent": CIRCLE_USER_AGENT,
       ...(init?.headers ?? {}),
     },
   });
