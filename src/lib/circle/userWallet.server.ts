@@ -211,9 +211,14 @@ export const emailLoginStart = createServerFn({ method: "POST" })
       };
     }
     const { code, message } = circleErrorMessage(probe.json, probe.text, "Circle email login failed");
-    if (code === 155150 || /smtp/i.test(message)) {
+    if (code === 155150) {
       throw new Error(
         "Circle login failed (155150): SMTP is not configured on the Live User-Controlled Wallets app. In Circle Console open Wallets → User Controlled → Configurator → Authentication Methods → Email and save SMTP, then try email login again.",
+      );
+    }
+    if (code === 155159 || /failed to auth to the smtp/i.test(message)) {
+      throw new Error(
+        "Circle login failed (155159): Gmail rejected the SMTP login. In Circle Email SMTP use Host smtp.gmail.com, Port 587, Username the full Gmail address, and the 16-character App Password with no spaces.",
       );
     }
     if (probe.status === 401 || /invalid credentials/i.test(message)) {

@@ -121,7 +121,10 @@ export function explainCircleLoginError(err: unknown): string {
   ) {
     return `Chrome blocked the Circle login window. ${CHROME_LOGIN_HELP}`;
   }
-  if (lower.includes("155150") || lower.includes("smtp")) {
+  if (lower.includes("155159") || lower.includes("failed to auth to the smtp")) {
+    return "Gmail rejected Circle's SMTP login. Re-save Email SMTP on Live: Host smtp.gmail.com, Port 587, Username the full Gmail address, Password the 16-character App Password with no spaces.";
+  }
+  if (lower.includes("155150")) {
     return "Circle email login is not set up yet. In Circle Console open Wallets → User Controlled → Configurator → Authentication Methods → Email, add SMTP (From address, host, port, username, password), save, then try again.";
   }
   if (
