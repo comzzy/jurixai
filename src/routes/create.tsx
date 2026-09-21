@@ -323,7 +323,7 @@ function CreateHackathon() {
       });
 
       // Execute inside the click handler so Chrome keeps the user gesture.
-      await runChallenge(sdkChallenge, activeChallengeId);
+      await runChallenge(sdkChallenge, activeChallengeId, activeSession);
 
       toast.loading("Payment authorized. Waiting for Circle to settle the USDC transfer...", {
         id: tid,

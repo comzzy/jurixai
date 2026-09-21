@@ -1,7 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 import { createWallet, loginWallet, type CircleWallet } from "./wallet";
-import { emailSignIn } from "./userWallet";
+import { emailSignIn, explainCircleLoginError } from "./userWallet";
 import {
   saveAccountProfile as saveAccountProfileServer,
 } from "@/lib/account/profile.server";
@@ -88,7 +88,7 @@ export function WalletProvider({ children }: { children: ReactNode }) {
         setWallet(session.wallet);
         setProfile(session.profile);
       } catch (e) {
-        const msg = e instanceof Error ? e.message : "Wallet action failed";
+        const msg = explainCircleLoginError(e instanceof Error ? e : "Wallet action failed");
         // Surface the real failure even if the modal has closed — the flow was
         // failing silently otherwise, which made it impossible to diagnose.
         // eslint-disable-next-line no-console

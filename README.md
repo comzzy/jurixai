@@ -114,7 +114,7 @@ Hosted endpoint: https://mcp.jurixai.xyz/mcp (same app also serves https://www.j
 
 ## 🌐 Browser Compatibility Note (Chrome/Safari/Brave)
 Circle login uses a secure window from `pw-auth.circle.com`. Chrome on a computer often blocks that window.
-*   **Chrome (PC):** Settings → Privacy and security → Third-party cookies → Allow third-party cookies (or add `[*.]circle.com`), then refresh. Incognito mode usually fails because Chrome blocks those cookies there.
+*   **Chrome (PC):** Allow the Circle popup when asked. If login still fails: `chrome://settings/cookies` → Sites allowed to use third-party cookies → Add `jurixai.xyz` and `www.jurixai.xyz` (the site you are on, not circle.com), then refresh. Incognito usually fails.
 *   **Safari (PC):** Allow cookies for Circle, or use Chrome with the setting above.
 *   **Brave:** Usually works. If login fails, allow cookies for `circle.com` in Shields.
 

@@ -8,6 +8,8 @@ import { emailLoginStatus } from "@/lib/circle/userWallet.server";
 import {
   explainCircleLoginError,
   isEmailLoginConfigured,
+  openCircleOtpWindow,
+  requestCircleStorageAccess,
   warmCircleLogin,
 } from "@/lib/circle/userWallet";
 import { isWalletConfigured } from "@/lib/circle/wallet";
@@ -16,6 +18,7 @@ import { truncateAddr } from "@/lib/format";
 import logoUrl from "@/assets/jurixai-logo.png";
 
 type Step = "choose" | "email" | "passkey";
+type EmailPhase = "idle" | "sending" | "enter_code" | "working";
 
 export function AccountButton() {
   const { wallet, busy, error, loginEmail, signOut, signUp, logIn } = useWallet();
@@ -26,6 +29,7 @@ export function AccountButton() {
   const [handle, setHandle] = useState("");
   const [serverReady, setServerReady] = useState<boolean | null>(null);
   const [serverError, setServerError] = useState<string | null>(null);
+  const [emailPhase, setEmailPhase] = useState<EmailPhase>("idle");
 
   useEffect(() => {
     if (!open) return;
@@ -117,7 +121,9 @@ export function AccountButton() {
     step === "choose"
       ? "Create your account, get a personal wallet, and unlock your profile dashboard."
       : step === "email"
-        ? "We'll email you a one-time code, create your wallet, and open your profile dashboard."
+        ? emailPhase === "enter_code"
+          ? "We sent a code to your email. Click below to open Circle and type it — then set a 6-digit PIN if asked."
+          : "We'll email you a one-time code, create your wallet, and open your profile dashboard."
         : "Use a passkey on this device to create your wallet and account.";
 
   function reset() {
@@ -126,6 +132,7 @@ export function AccountButton() {
     setHandle("");
     setServerError(null);
     setServerReady(null);
+    setEmailPhase("idle");
   }
 
   return (
@@ -141,7 +148,10 @@ export function AccountButton() {
       </button>
 
       <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent className="max-w-sm rounded-2xl p-6" onCloseAutoFocus={(e) => e.preventDefault()}>
+        <DialogContent
+          className="max-w-sm rounded-2xl p-6"
+          onCloseAutoFocus={(e) => e.preventDefault()}
+        >
           <div className="flex flex-col items-center text-center">
             <img src={logoUrl} alt="JuriXAI" className="size-10 object-contain mb-3" />
             <DialogTitle className="text-xl font-bold tracking-tight">{title}</DialogTitle>
@@ -152,7 +162,9 @@ export function AccountButton() {
             <p className="mt-4 rounded-lg bg-warn/10 text-warn text-xs p-3">{setupMessage}</p>
           )}
           {step === "passkey" && passkeySetupMessage && (
-            <p className="mt-4 rounded-lg bg-warn/10 text-warn text-xs p-3">{passkeySetupMessage}</p>
+            <p className="mt-4 rounded-lg bg-warn/10 text-warn text-xs p-3">
+              {passkeySetupMessage}
+            </p>
           )}
 
           {/* Step: choose method */}
@@ -209,21 +221,57 @@ export function AccountButton() {
               />
               {error && <p className="text-warn text-xs">{error}</p>}
               <button
-                disabled={busy || !email.trim() || !configured || serverReady === null}
+                disabled={
+                  emailPhase === "sending" ||
+                  emailPhase === "working" ||
+                  !email.trim() ||
+                  !configured ||
+                  serverReady === null
+                }
                 onClick={async () => {
-                  const tid = toast.loading("Sending verification email...");
+                  if (emailPhase === "enter_code") {
+                    setEmailPhase("working");
+                    setOpen(false);
+                    void requestCircleStorageAccess();
+                    openCircleOtpWindow();
+                    toast.loading(
+                      "Enter the code in the Circle window, then set a 6-digit PIN if asked.",
+                      {
+                        id: "jurix-email-login",
+                      },
+                    );
+                    return;
+                  }
+
+                  const tid = "jurix-email-login";
+                  toast.loading(
+                    "Sending verification email. If a Circle window opens, leave it open.",
+                    {
+                      id: tid,
+                    },
+                  );
+                  setEmailPhase("sending");
+                  void requestCircleStorageAccess();
                   try {
                     await loginEmail(email.trim().toLowerCase(), (status: string) => {
                       if (status === "awaiting_otp") {
-                        // Close our dialog so Chrome can focus Circle's OTP iframe.
-                        setOpen(false);
-                        toast.loading("Email sent. Enter the code in the Circle window, then set a 6-digit PIN if asked.", { id: tid });
+                        setEmailPhase("enter_code");
+                        toast.loading("Email sent. Click “Enter the code” to open Circle.", {
+                          id: tid,
+                        });
                       } else if (status === "verifying_wallet") {
+                        setEmailPhase("working");
                         toast.loading("Connecting wallet session...", { id: tid });
                       } else if (status === "awaiting_pin") {
-                        toast.loading("PIN keypad loading... Please wait for the keyboard to pop up in the secure window.", { id: tid });
+                        toast.loading(
+                          "PIN keypad loading... Please wait for the keyboard to pop up in the secure window.",
+                          { id: tid },
+                        );
                       } else if (status === "polling_address") {
-                        toast.loading("Security PIN set! Creating and deploying smart wallet on-chain (please wait, up to 20s)...", { id: tid });
+                        toast.loading(
+                          "Security PIN set! Creating and deploying smart wallet on-chain (please wait, up to 20s)...",
+                          { id: tid },
+                        );
                       }
                     });
                     toast.success("Wallet ready", {
@@ -232,6 +280,7 @@ export function AccountButton() {
                     });
                     window.location.href = "/profile";
                   } catch (err) {
+                    setEmailPhase("idle");
                     const msg = explainCircleLoginError(err);
                     toast.error("Login failed", {
                       id: tid,
@@ -242,11 +291,15 @@ export function AccountButton() {
                 }}
                 className="w-full rounded-lg bg-accent text-accent-foreground px-4 py-2.5 text-sm font-semibold shadow-sm hover:opacity-90 disabled:opacity-50 transition-opacity cursor-pointer"
               >
-                {busy
+                {emailPhase === "sending"
                   ? "Sending code…"
-                  : serverReady === null
-                    ? "Checking setup…"
-                    : "Email me a code"}
+                  : emailPhase === "enter_code"
+                    ? "Enter the code"
+                    : emailPhase === "working"
+                      ? "Waiting for Circle…"
+                      : serverReady === null
+                        ? "Checking setup…"
+                        : "Email me a code"}
               </button>
               <div className="flex justify-between items-center pt-1">
                 <button
@@ -314,14 +367,18 @@ export function AccountButton() {
           )}
 
           <p className="mt-5 text-center text-[10px] font-mono uppercase tracking-widest text-muted-foreground">
-            {step === "passkey" ? `Passkey on ${CHAIN_DISPLAY_NAME}` : `Gasless on ${CHAIN_DISPLAY_NAME}`} ·
-            {" "}Secured by Circle
+            {step === "passkey"
+              ? `Passkey on ${CHAIN_DISPLAY_NAME}`
+              : `Gasless on ${CHAIN_DISPLAY_NAME}`}{" "}
+            · Secured by Circle
           </p>
 
           <div className="mt-4 rounded-lg border border-border bg-muted/30 p-2.5 text-[11px] text-muted-foreground leading-relaxed">
-            Chrome on a computer: if login gets stuck, allow cookies for Circle. Open Settings → Privacy
-            and security → Third-party cookies → Allow (or add{" "}
-            <span className="font-mono">[*.]circle.com</span>), then refresh this page.
+            On a computer, allow the Circle popup if the browser asks. If login still fails in
+            Chrome: open <span className="font-mono">chrome://settings/cookies</span> → Sites
+            allowed to use third-party cookies → Add <span className="font-mono">jurixai.xyz</span>{" "}
+            and <span className="font-mono">www.jurixai.xyz</span> (this site, not circle.com), then
+            refresh. Incognito usually fails.
           </div>
         </DialogContent>
       </Dialog>
