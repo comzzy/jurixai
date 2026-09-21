@@ -8,7 +8,6 @@ import { emailLoginStatus } from "@/lib/circle/userWallet.server";
 import {
   explainCircleLoginError,
   isEmailLoginConfigured,
-  openCircleOtpWindow,
   requestCircleStorageAccess,
   warmCircleLogin,
 } from "@/lib/circle/userWallet";
@@ -18,7 +17,7 @@ import { truncateAddr } from "@/lib/format";
 import logoUrl from "@/assets/jurixai-logo.png";
 
 type Step = "choose" | "email" | "passkey";
-type EmailPhase = "idle" | "sending" | "enter_code" | "working";
+type EmailPhase = "idle" | "sending" | "working";
 
 export function AccountButton() {
   const { wallet, busy, error, loginEmail, signOut, signUp, logIn } = useWallet();
@@ -121,9 +120,7 @@ export function AccountButton() {
     step === "choose"
       ? "Create your account, get a personal wallet, and unlock your profile dashboard."
       : step === "email"
-        ? emailPhase === "enter_code"
-          ? "We sent a code to your email. Click below to open Circle and type it — then set a 6-digit PIN if asked."
-          : "We'll email you a one-time code, create your wallet, and open your profile dashboard."
+        ? "We'll email you a one-time code. Circle opens on this page — type the code there, then a 6-digit PIN if asked."
         : "Use a passkey on this device to create your wallet and account.";
 
   function reset() {
@@ -229,42 +226,31 @@ export function AccountButton() {
                   serverReady === null
                 }
                 onClick={async () => {
-                  if (emailPhase === "enter_code") {
-                    setEmailPhase("working");
-                    setOpen(false);
-                    void requestCircleStorageAccess();
-                    openCircleOtpWindow();
-                    toast.loading(
-                      "Enter the code in the Circle window, then set a 6-digit PIN if asked.",
-                      {
-                        id: "jurix-email-login",
-                      },
-                    );
-                    return;
-                  }
-
                   const tid = "jurix-email-login";
-                  toast.loading(
-                    "Sending verification email. If a Circle window opens, leave it open.",
-                    {
-                      id: tid,
-                    },
-                  );
                   setEmailPhase("sending");
+                  // Close our modal first so Chrome can show Circle's iframe
+                  // (a dialog overlay + hidden iframe is what blocked PC login).
+                  setOpen(false);
                   void requestCircleStorageAccess();
+                  toast.loading("Sending the code. Circle will open on this page.", {
+                    id: tid,
+                  });
                   try {
                     await loginEmail(email.trim().toLowerCase(), (status: string) => {
                       if (status === "awaiting_otp") {
-                        setEmailPhase("enter_code");
-                        toast.loading("Email sent. Click “Enter the code” to open Circle.", {
-                          id: tid,
-                        });
+                        setEmailPhase("working");
+                        toast.loading(
+                          "Email sent. Type the code in the Circle panel on this page.",
+                          {
+                            id: tid,
+                          },
+                        );
                       } else if (status === "verifying_wallet") {
                         setEmailPhase("working");
                         toast.loading("Connecting wallet session...", { id: tid });
                       } else if (status === "awaiting_pin") {
                         toast.loading(
-                          "PIN keypad loading... Please wait for the keyboard to pop up in the secure window.",
+                          "PIN keypad loading... Enter your 6-digit PIN in the Circle panel.",
                           { id: tid },
                         );
                       } else if (status === "polling_address") {
@@ -281,6 +267,8 @@ export function AccountButton() {
                     window.location.href = "/profile";
                   } catch (err) {
                     setEmailPhase("idle");
+                    setStep("email");
+                    setOpen(true);
                     const msg = explainCircleLoginError(err);
                     toast.error("Login failed", {
                       id: tid,
@@ -291,15 +279,11 @@ export function AccountButton() {
                 }}
                 className="w-full rounded-lg bg-accent text-accent-foreground px-4 py-2.5 text-sm font-semibold shadow-sm hover:opacity-90 disabled:opacity-50 transition-opacity cursor-pointer"
               >
-                {emailPhase === "sending"
+                {emailPhase === "sending" || emailPhase === "working"
                   ? "Sending code…"
-                  : emailPhase === "enter_code"
-                    ? "Enter the code"
-                    : emailPhase === "working"
-                      ? "Waiting for Circle…"
-                      : serverReady === null
-                        ? "Checking setup…"
-                        : "Email me a code"}
+                  : serverReady === null
+                    ? "Checking setup…"
+                    : "Email me a code"}
               </button>
               <div className="flex justify-between items-center pt-1">
                 <button
@@ -374,11 +358,10 @@ export function AccountButton() {
           </p>
 
           <div className="mt-4 rounded-lg border border-border bg-muted/30 p-2.5 text-[11px] text-muted-foreground leading-relaxed">
-            On a computer, allow the Circle popup if the browser asks. If login still fails in
-            Chrome: open <span className="font-mono">chrome://settings/cookies</span> → Sites
-            allowed to use third-party cookies → Add <span className="font-mono">jurixai.xyz</span>{" "}
-            and <span className="font-mono">www.jurixai.xyz</span> (this site, not circle.com), then
-            refresh. Incognito usually fails.
+            After you click Email me a code, Circle stays on this page — close any extra Circle tab
+            Chrome may have opened. Cookie exceptions must be for{" "}
+            <span className="font-mono">jurixai.xyz</span> and{" "}
+            <span className="font-mono">www.jurixai.xyz</span>. Incognito usually fails.
           </div>
         </DialogContent>
       </Dialog>

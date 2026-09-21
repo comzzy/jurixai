@@ -3,15 +3,13 @@
  *
  * Uses @circle-fin/w3s-pw-web-sdk (dynamically imported so it stays out of the
  * SSR bundle). IMPORTANT: a single SDK instance is reused across the OTP login
- * and the PIN-setup challenge. Creating a second instance for the challenge (as
- * the old code did) leaves Circle's PIN screen unrendered, so the flow hangs on
- * "creating" forever. This mirrors Circle's own reference apps (e.g. Polaris).
+ * and the PIN-setup challenge. Creating a second instance for the challenge
+ * leaves Circle's PIN screen unrendered.
  *
- * Chrome/Edge/Brave on a computer block Circle's hidden third-party iframe
- * (`pw-auth.circle.com`) even when the user "allows third-party cookies" — the
- * exception list is for the *site you are on* (jurixai.xyz), and getDeviceId
- * also races with warmup. Desktop therefore opens Circle as a first-party
- * popup; phones keep the iframe, which already works there.
+ * Circle's auth UI only postMessages to window.parent, so a popup cannot
+ * complete login. Chrome on a computer also skips JS in display:none / 0×0
+ * third-party iframes, which is why getDeviceId used to fail with a cookies
+ * error. We force Circle's iframe to stay a real on-screen window.
  */
 import { emailLoginStart, provisionWallet, listUserWallets } from "./userWallet.server";
 import type { CircleWallet } from "./wallet";
@@ -23,7 +21,7 @@ const APP_ID = circleAppId();
 const CHAIN = CIRCLE_CHAIN_CODE;
 const CIRCLE_AUTH = "https://pw-auth.circle.com";
 const DEVICE_ID_STORAGE_KEY = "jurixai_circle_device_id";
-const SDK_VERSION = "1.1.11";
+const STAGE_ID = "jurix-circle-stage";
 
 export function isEmailLoginConfigured(): boolean {
   return Boolean(APP_ID);
@@ -52,22 +50,14 @@ type CircleLoginResult = {
   };
 };
 
-// The SDK's types are loose; keep a local alias to avoid `any` sprawl.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type W3S = any;
 
-type LoginConfigs = {
-  deviceToken: string;
-  deviceEncryptionKey: string;
-  otpToken: string;
-};
+type LoginCallback = (
+  error: CircleLoginError | undefined,
+  result: CircleLoginResult | undefined,
+) => void;
 
-/**
- * Circle's SDK deps (jsonwebtoken/uuid) expect Node globals in the browser. The
- * client build aliases the `buffer`/`process` modules, but some transitive code
- * reads the bare `Buffer`/`process`/`global` globals — populate them before the
- * SDK loads. No-op on the server.
- */
 async function ensureBrowserGlobals(): Promise<void> {
   if (typeof window === "undefined") return;
   const g = globalThis as unknown as Record<string, unknown>;
@@ -88,19 +78,8 @@ async function ensureBrowserGlobals(): Promise<void> {
   patchCircleIframeForChrome();
 }
 
-function isMobileBrowser(): boolean {
-  if (typeof navigator === "undefined") return false;
-  return /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
-}
-
-/** Desktop Chrome/Edge/Brave/Safari: Circle iframe storage is blocked. Use a popup. */
-function preferCirclePopup(): boolean {
-  if (typeof window === "undefined") return false;
-  return !isMobileBrowser();
-}
-
 export const CHROME_LOGIN_HELP =
-  "Allow popups for jurixai.xyz. If login still fails, in Chrome open chrome://settings/cookies → Sites allowed to use third-party cookies → Add jurixai.xyz and www.jurixai.xyz (this site, not circle.com), then refresh. Incognito usually fails.";
+  "Hard-refresh this page (Ctrl+Shift+R). Circle stays on this page — if Chrome opened a separate Circle tab, close it. Then chrome://settings/cookies → Sites allowed to use third-party cookies → Add jurixai.xyz and www.jurixai.xyz (this site). Do not use Incognito.";
 
 export function explainCircleLoginError(err: unknown): string {
   const raw = err instanceof Error ? err.message : String(err || "Login failed");
@@ -133,19 +112,14 @@ export function explainCircleLoginError(err: unknown): string {
   return raw;
 }
 
-type LoginCallback = (
-  error: CircleLoginError | undefined,
-  result: CircleLoginResult | undefined,
-) => void;
-
 let cachedDeviceId: string | null = null;
 let deviceIdInFlight: Promise<string> | null = null;
 let activeLoginCallback: LoginCallback | undefined;
 let loginInFlight = false;
 let pendingSdk: W3S | null = null;
-let pendingLoginConfigs: LoginConfigs | null = null;
-let otpOpenedResolve: (() => void) | null = null;
-let circlePopup: Window | null = null;
+let pendingEmail = "";
+let overlayCancel: (() => void) | null = null;
+let loginCancelled = false;
 
 function readStoredDeviceId(): string | null {
   if (typeof window === "undefined") return null;
@@ -167,63 +141,157 @@ function storeDeviceId(deviceId: string): void {
   }
 }
 
-function markCircleIframe(node: Node): void {
-  if (!(node instanceof HTMLIFrameElement)) return;
+function circleStageCard(): HTMLElement | null {
+  return document.getElementById(`${STAGE_ID}-card`);
+}
+
+function setCircleStageStatus(text: string): void {
+  const el = document.getElementById(`${STAGE_ID}-status`);
+  if (el) el.textContent = text;
+}
+
+function ensureCircleStage(): HTMLElement | null {
+  if (typeof document === "undefined") return null;
+  let stage = document.getElementById(STAGE_ID);
+  if (stage) return stage;
+
+  stage = document.createElement("div");
+  stage.id = STAGE_ID;
+  stage.setAttribute("data-jurix-circle", "1");
+  stage.style.cssText = [
+    "position:fixed",
+    "inset:0",
+    "z-index:2147483646",
+    "background:rgba(15,18,22,0.55)",
+    "display:flex",
+    "align-items:center",
+    "justify-content:center",
+    "pointer-events:auto",
+    "padding:16px",
+  ].join(";");
+
+  const card = document.createElement("div");
+  card.id = `${STAGE_ID}-card`;
+  card.style.cssText = [
+    "position:relative",
+    "width:min(480px, 100%)",
+    "height:min(640px, 100%)",
+    "background:#fff",
+    "border-radius:12px",
+    "overflow:hidden",
+    "box-shadow:0 24px 64px rgba(0,0,0,0.35)",
+    "display:flex",
+    "flex-direction:column",
+  ].join(";");
+
+  const bar = document.createElement("div");
+  bar.style.cssText =
+    "display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 12px;background:#f4f6f8;color:#1b1f24;font:600 13px/1.3 system-ui,sans-serif;";
+  const status = document.createElement("p");
+  status.id = `${STAGE_ID}-status`;
+  status.style.cssText = "margin:0;flex:1;";
+  status.textContent = "Connecting to Circle…";
+  const close = document.createElement("button");
+  close.type = "button";
+  close.setAttribute("aria-label", "Close Circle login");
+  close.textContent = "×";
+  close.style.cssText =
+    "border:0;background:transparent;color:#1b1f24;font-size:22px;line-height:1;cursor:pointer;padding:0 4px;";
+  close.addEventListener("click", () => {
+    overlayCancel?.();
+    overlayCancel = null;
+    removeCircleStage();
+  });
+  bar.append(status, close);
+  card.append(bar);
+  stage.append(card);
+  document.body.appendChild(stage);
+  return stage;
+}
+
+function removeCircleStage(): void {
+  if (typeof document === "undefined") return;
+  document.getElementById(STAGE_ID)?.remove();
+}
+
+function isCircleIframe(node: HTMLIFrameElement): boolean {
   const src = node.getAttribute("src") || node.src || "";
-  const isCircle =
-    node.id === "sdkIframe" || src.includes("pw-auth.circle.com") || src.includes("w3s.circle.com");
-  if (!isCircle) return;
+  return (
+    node.id === "sdkIframe" || src.includes("pw-auth.circle.com") || src.includes("w3s.circle.com")
+  );
+}
+
+let applyingCircleIframeStyle = false;
+function markCircleIframe(node: Node): void {
+  if (applyingCircleIframeStyle) return;
+  if (!(node instanceof HTMLIFrameElement) || !isCircleIframe(node)) return;
+
+  const src = node.getAttribute("src") || node.src || "";
+  applyingCircleIframeStyle = true;
 
   node.setAttribute("allow", "storage-access *; clipboard-write *");
   node.allow = "storage-access *; clipboard-write *";
-  node.style.pointerEvents = "auto";
+  node.removeAttribute("hidden");
+  node.loading = "eager";
 
-  // Circle hides the device-id iframe (display:none, 0×0). Chrome often will
-  // not run JS / storage in a hidden third-party iframe, so getDeviceId never
-  // returns. Keep a 1×1 live frame instead.
-  const isDeviceId = src.includes("device-id");
-  if (isDeviceId || node.style.display === "none" || node.width === "0%") {
-    node.style.display = "block";
-    node.style.width = "1px";
-    node.style.height = "1px";
-    node.style.opacity = "0.01";
-    node.style.position = "fixed";
-    node.style.left = "0px";
-    node.style.top = "0px";
-    node.style.zIndex = "0";
-    node.width = "1";
-    node.height = "1";
-    if (isDeviceId) node.style.pointerEvents = "none";
+  // Chrome skips JS in display:none / 0×0 third-party iframes. Keep every
+  // Circle frame (device-id, OTP, PIN) as a real on-page window. Circle posts
+  // to window.parent, so a popup to pw-auth.circle.com can never finish login.
+  ensureCircleStage();
+  if (src.includes("verify-email")) {
+    setCircleStageStatus("Enter the code from your email");
+  } else if (src.includes("device-id")) {
+    setCircleStageStatus("Connecting to Circle…");
   } else {
-    node.style.zIndex = "2147483647";
+    setCircleStageStatus("Enter your 6-digit PIN");
   }
+
+  node.style.cssText = [
+    "flex:1",
+    "width:100%",
+    "height:100%",
+    "min-height:520px",
+    "border:0",
+    "background:#fff",
+    "display:block",
+    "opacity:1",
+    "pointer-events:auto",
+  ].join(";");
+  node.width = "480";
+  node.height = "640";
+  applyingCircleIframeStyle = false;
 }
 
-/**
- * Chrome (PC) blocks the Circle login iframe (`pw-auth.circle.com`) unless it
- * is allowed to use third-party storage. Circle's SDK creates `#sdkIframe`
- * without `allow="storage-access"`, so getDeviceId / OTP / PIN fail with a
- * generic "Account/wallet error". Patch appendChild so the iframe is allowed
- * the moment it is mounted.
- */
 let circleIframePatched = false;
 function patchCircleIframeForChrome(): void {
   if (circleIframePatched || typeof Element === "undefined") return;
   circleIframePatched = true;
 
-  const original = Node.prototype.appendChild;
+  const originalAppend = Node.prototype.appendChild;
   Node.prototype.appendChild = function appendChildPatched<T extends Node>(node: T): T {
-    markCircleIframe(node);
-    return original.call(this, node) as T;
+    if (node instanceof HTMLIFrameElement && isCircleIframe(node)) {
+      markCircleIframe(node);
+      const card = circleStageCard();
+      if (card && this !== card) {
+        return originalAppend.call(card, node) as T;
+      }
+    }
+    return originalAppend.call(this, node) as T;
   };
 
   if (typeof MutationObserver !== "undefined" && typeof document !== "undefined") {
     const observer = new MutationObserver((records) => {
       for (const record of records) {
         record.addedNodes.forEach((node) => markCircleIframe(node));
+        if (record.type === "attributes" && record.target instanceof HTMLIFrameElement) {
+          markCircleIframe(record.target);
+        }
       }
     });
-    observer.observe(document.documentElement, { childList: true, subtree: true });
+    observer.observe(document.documentElement, {
+      childList: true,
+      subtree: true,
+    });
   }
 }
 
@@ -244,170 +312,19 @@ export async function requestCircleStorageAccess(): Promise<void> {
     try {
       await doc.requestStorageAccessFor(origin);
     } catch {
-      /* origin is not in a Related Website Set — ignore */
+      /* not in a Related Website Set */
     }
   }
 }
-
-function circlePageOrigin(): string {
-  return `${window.location.protocol}//${window.location.host}`;
-}
-
-function w3sConfigPayload(extra?: {
-  challenge?: { challengeId: string };
-  auth?: Session;
-}): Record<string, unknown> {
-  return {
-    w3s: {
-      appSettings: { appId: APP_ID },
-      auth: extra?.auth ?? undefined,
-      challenge: extra?.challenge ?? undefined,
-      customizations: {
-        securityQuestions: {
-          questions: undefined,
-          requiredCount: 2,
-          securityConfirmItems: undefined,
-        },
-      },
-      deviceInfo: { model: "Web", version: SDK_VERSION },
-      socialVerification: {
-        token: undefined,
-        deviceToken: pendingLoginConfigs?.deviceToken,
-        deviceEncryptionKey: pendingLoginConfigs?.deviceEncryptionKey,
-        socialLoginProvider: undefined,
-      },
-      emailVerification: pendingLoginConfigs
-        ? {
-            deviceToken: pendingLoginConfigs.deviceToken,
-            deviceEncryptionKey: pendingLoginConfigs.deviceEncryptionKey,
-            otpToken: pendingLoginConfigs.otpToken,
-          }
-        : undefined,
-    },
-  };
-}
-
-function openCirclePopup(subRoute: string): Window {
-  if (circlePopup && !circlePopup.closed) {
-    try {
-      circlePopup.location.href = `${CIRCLE_AUTH}/${subRoute}?origin=${encodeURIComponent(circlePageOrigin())}`;
-      circlePopup.focus();
-      return circlePopup;
-    } catch {
-      /* fall through and open a new one */
-    }
-  }
-  const popup = window.open(
-    `${CIRCLE_AUTH}/${subRoute}?origin=${encodeURIComponent(circlePageOrigin())}`,
-    "jurix-circle-auth",
-    "popup=yes,width=480,height=720",
-  );
-  if (!popup) {
-    throw new Error("Popup blocked. Allow popups for jurixai.xyz, then try again.");
-  }
-  circlePopup = popup;
-  return popup;
-}
-
-function closeCirclePopup(): void {
-  try {
-    circlePopup?.close();
-  } catch {
-    /* already closed */
-  }
-  circlePopup = null;
-}
-
-function getDeviceIdViaPopup(): Promise<string> {
-  const popup = openCirclePopup("device-id");
-  return new Promise<string>((resolve, reject) => {
-    const timer = window.setTimeout(() => {
-      cleanup();
-      closeCirclePopup();
-      reject(new Error("Failed to receive deviceId"));
-    }, 20000);
-
-    function cleanup() {
-      window.clearTimeout(timer);
-      window.removeEventListener("message", onMsg);
-    }
-
-    function onMsg(event: MessageEvent) {
-      if (event.origin !== CIRCLE_AUTH) return;
-      const data = event.data as Record<string, unknown> | null;
-      if (!data) return;
-      if (data.onFrameReady) {
-        (event.source as Window | null)?.postMessage(w3sConfigPayload(), CIRCLE_AUTH);
-        return;
-      }
-      if (typeof data.deviceId === "string" && data.deviceId) {
-        cleanup();
-        closeCirclePopup();
-        resolve(data.deviceId);
-      }
-    }
-
-    window.addEventListener("message", onMsg);
-    void popup;
-  });
-}
-
-function verifyOtpViaPopup(): void {
-  const popup = openCirclePopup("social/verify-email");
-
-  const onMsg = (event: MessageEvent) => {
-    if (event.origin !== CIRCLE_AUTH) return;
-    const data = event.data as Record<string, unknown> | null;
-    if (!data) return;
-
-    if (data.onFrameReady) {
-      (event.source as Window | null)?.postMessage(w3sConfigPayload(), CIRCLE_AUTH);
-      return;
-    }
-
-    if (data.onEmailLoginVerified) {
-      const verified = data.onEmailLoginVerified as {
-        result?: CircleLoginResult;
-        error?: CircleLoginError;
-      };
-      activeLoginCallback?.(verified.error, verified.result);
-      if (verified.result && !verified.error) {
-        window.removeEventListener("message", onMsg);
-        closeCirclePopup();
-      }
-      return;
-    }
-
-    if (data.onResendOtpEmail && pendingSdk) {
-      void applyEmailLoginTokens(pendingSdk, pendingEmail).then(() => {
-        try {
-          popup.postMessage(w3sConfigPayload(), CIRCLE_AUTH);
-        } catch {
-          /* popup gone */
-        }
-      });
-      return;
-    }
-
-    if (data.onClose) {
-      window.removeEventListener("message", onMsg);
-      closeCirclePopup();
-      activeLoginCallback?.({ message: "Verification was cancelled by user." }, undefined);
-    }
-  };
-
-  window.addEventListener("message", onMsg);
-}
-
-let pendingEmail = "";
 
 function extractSession(result: unknown): Session | null {
   if (!result || typeof result !== "object") return null;
   const rows: Record<string, unknown>[] = [result as Record<string, unknown>];
   const root = result as Record<string, unknown>;
   if (root.data && typeof root.data === "object") rows.push(root.data as Record<string, unknown>);
-  if (root.result && typeof root.result === "object")
+  if (root.result && typeof root.result === "object") {
     rows.push(root.result as Record<string, unknown>);
+  }
   for (const row of rows) {
     const userToken = row.userToken ?? row.user_token;
     const encryptionKey = row.encryptionKey ?? row.encryption_key;
@@ -428,8 +345,6 @@ async function createCircleSdk(onLoginComplete?: LoginCallback): Promise<W3S> {
   await ensureBrowserGlobals();
   const { W3SSdk } = await import("@circle-fin/w3s-pw-web-sdk");
   if (onLoginComplete) activeLoginCallback = onLoginComplete;
-  // W3SSdk is a singleton. Re-apply the last login callback so a warmup or PIN
-  // `new W3SSdk()` does not wipe OTP completion on Chrome.
   const sdk: W3S = new W3SSdk({ appSettings: { appId: APP_ID } }, activeLoginCallback);
   hardenCircleIframe();
   pendingSdk = sdk;
@@ -446,20 +361,9 @@ async function readDeviceId(sdk: W3S): Promise<string> {
   if (deviceIdInFlight) return deviceIdInFlight;
 
   deviceIdInFlight = (async () => {
-    if (preferCirclePopup()) {
-      try {
-        const deviceId = await getDeviceIdViaPopup();
-        if (deviceId) {
-          storeDeviceId(deviceId);
-          return deviceId;
-        }
-      } catch (err) {
-        throw new Error(explainCircleLoginError(err));
-      }
-    }
-
     let lastError: unknown;
-    for (let attempt = 0; attempt < 2; attempt++) {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (loginCancelled) throw new Error("Verification was cancelled by user.");
       try {
         const deviceId = await sdk.getDeviceId();
         hardenCircleIframe();
@@ -470,10 +374,10 @@ async function readDeviceId(sdk: W3S): Promise<string> {
       } catch (err) {
         lastError = err;
         cachedDeviceId = null;
-        await new Promise((r) => setTimeout(r, 400));
+        if (loginCancelled) throw new Error("Verification was cancelled by user.");
+        await new Promise((r) => setTimeout(r, 600));
       }
     }
-
     throw new Error(explainCircleLoginError(lastError ?? new Error("Failed to receive deviceId")));
   })();
 
@@ -484,17 +388,12 @@ async function readDeviceId(sdk: W3S): Promise<string> {
   }
 }
 
-/** Preload Circle's iframe + deviceId while the user types their email. */
+/** Preload Circle's SDK while the user types their email. Skip getDeviceId —
+ *  desktop Chrome would otherwise flash a blank Circle frame before Send. */
 export async function warmCircleLogin(): Promise<void> {
   if (loginInFlight) return;
   try {
-    const sdk = await createCircleSdk();
-    // Desktop Chrome cannot complete getDeviceId in a hidden iframe; opening a
-    // popup here would surprise the user. Preload the SDK only. Phones still
-    // warm the iframe so Send is instant.
-    if (!preferCirclePopup()) {
-      await readDeviceId(sdk);
-    }
+    await createCircleSdk();
   } catch (err) {
     console.warn("[jurix wallet] Circle login warmup failed", err);
   }
@@ -531,7 +430,6 @@ function handleLoginComplete(
       lower.includes("invalid otp") ||
       lower.includes("invalid code") ||
       (lower.includes("expired") && lower.includes("code"));
-    // Wrong code: keep the Circle popup open so the user can retry / resend.
     if (isRetryableOtp) return;
     const isCancel =
       lower.includes("cancel") || lower.includes("close") || lower.includes("dismiss");
@@ -550,11 +448,6 @@ async function applyEmailLoginTokens(sdk: W3S, email: string): Promise<void> {
   if (!otpToken) {
     throw new Error("Circle did not return an OTP token. Try sending the code again.");
   }
-  pendingLoginConfigs = {
-    deviceToken: tok.deviceToken,
-    deviceEncryptionKey: tok.deviceEncryptionKey,
-    otpToken,
-  };
   sdk.updateConfigs(
     {
       appSettings: { appId: APP_ID },
@@ -569,39 +462,25 @@ async function applyEmailLoginTokens(sdk: W3S, email: string): Promise<void> {
   hardenCircleIframe();
 }
 
-/**
- * Call from a real click after the email is sent. Desktop opens Circle as a
- * first-party window (cookies work). Phones keep Circle's iframe.
- */
 export function openCircleOtpWindow(): void {
-  void requestCircleStorageAccess();
-  if (!pendingSdk) {
-    otpOpenedResolve?.();
-    otpOpenedResolve = null;
-    return;
-  }
-  if (preferCirclePopup()) {
-    verifyOtpViaPopup();
-  } else {
-    if (typeof pendingSdk.setOnResendOtpEmail === "function") {
-      pendingSdk.setOnResendOtpEmail(() => {
-        void applyEmailLoginTokens(pendingSdk, pendingEmail).catch((err) => {
-          console.warn("[jurix wallet] resend OTP failed", err);
-        });
+  if (!pendingSdk) return;
+  if (typeof pendingSdk.setOnResendOtpEmail === "function") {
+    pendingSdk.setOnResendOtpEmail(() => {
+      void applyEmailLoginTokens(pendingSdk, pendingEmail).catch((err) => {
+        console.warn("[jurix wallet] resend OTP failed", err);
       });
-    }
-    pendingSdk.verifyOtp();
-    hardenCircleIframe();
+    });
   }
-  otpOpenedResolve?.();
-  otpOpenedResolve = null;
+  pendingSdk.verifyOtp();
+  hardenCircleIframe();
+  window.setTimeout(() => hardenCircleIframe(), 300);
+  window.setTimeout(() => hardenCircleIframe(), 1200);
 }
 
 async function waitForEmailOtpSession(
   email: string,
   fallbackMessage: string,
   onOtpSent?: () => void,
-  options?: { waitForOpenClick?: boolean },
 ): Promise<{ sdk: W3S; session: Session }> {
   let resolveLogin!: (s: Session) => void;
   let rejectLogin!: (e: Error) => void;
@@ -620,20 +499,6 @@ async function waitForEmailOtpSession(
     settled = true;
     rejectLogin(e);
   };
-
-  // Keep this synchronous so a user click can still open a Circle popup
-  // (desktop Chrome blocks the iframe and also blocks popups after `await`).
-  if (preferCirclePopup()) {
-    try {
-      if (!cachedDeviceId && !readStoredDeviceId()) {
-        openCirclePopup("device-id");
-      } else if (!options?.waitForOpenClick) {
-        openCirclePopup("social/verify-email");
-      }
-    } catch {
-      /* iframe fallback if popups are blocked */
-    }
-  }
 
   const sdk = await createCircleSdk((error, result) =>
     handleLoginComplete(error, result, resolveOnce, rejectOnce, fallbackMessage),
@@ -659,7 +524,12 @@ async function waitForEmailOtpSession(
   }
 
   loginInFlight = true;
+  loginCancelled = false;
   pendingEmail = email;
+  overlayCancel = () => {
+    loginCancelled = true;
+    rejectOnce(new Error("Verification was cancelled by user."));
+  };
   try {
     await applyEmailLoginTokens(sdk, email);
     if (typeof sdk.setOnResendOtpEmail === "function") {
@@ -670,14 +540,7 @@ async function waitForEmailOtpSession(
       });
     }
     onOtpSent?.();
-
-    if (options?.waitForOpenClick) {
-      await new Promise<void>((resolve) => {
-        otpOpenedResolve = resolve;
-      });
-    } else {
-      openCircleOtpWindow();
-    }
+    openCircleOtpWindow();
 
     const session = await Promise.race([
       loginDone,
@@ -685,99 +548,35 @@ async function waitForEmailOtpSession(
         window.setTimeout(() => {
           rej(
             new Error(
-              "Circle did not finish email verification. Allow this site to use third-party cookies, or allow the Circle popup, then try again.",
+              "Circle did not finish email verification. Hard-refresh, then allow this site to use third-party cookies and try again.",
             ),
           );
         }, 180000);
       }),
     ]);
     return { sdk, session };
+  } catch (err) {
+    removeCircleStage();
+    throw err;
   } finally {
     loginInFlight = false;
+    overlayCancel = null;
     if (typeof window !== "undefined") {
       window.removeEventListener("message", onCircleMessage);
     }
   }
 }
 
-/** Initiate email OTP login and return the session token when verified. */
 export async function getEmailSession(email: string): Promise<Session> {
   const { session } = await waitForEmailOtpSession(email, "Email verification failed.");
   return session;
 }
 
-function executeChallengeViaPopup(
-  challengeId: string,
-  auth: Session,
-): Promise<CircleChallengeResult> {
-  const popup = openCirclePopup("");
-  return new Promise<CircleChallengeResult>((resolve, reject) => {
-    const timer = window.setTimeout(() => {
-      cleanup();
-      reject(new Error("Circle PIN window timed out. Allow the popup and try again."));
-    }, 180000);
-
-    function cleanup() {
-      window.clearTimeout(timer);
-      window.removeEventListener("message", onMsg);
-    }
-
-    function onMsg(event: MessageEvent) {
-      if (event.origin !== CIRCLE_AUTH) return;
-      const data = event.data as Record<string, unknown> | null;
-      if (!data) return;
-
-      if (data.onFrameReady) {
-        (event.source as Window | null)?.postMessage(
-          w3sConfigPayload({ challenge: { challengeId }, auth }),
-          CIRCLE_AUTH,
-        );
-        return;
-      }
-
-      if (data.onComplete) {
-        cleanup();
-        closeCirclePopup();
-        const result = data.result as CircleChallengeResult | undefined;
-        if (!result) {
-          reject(new Error("Challenge finished without a result."));
-          return;
-        }
-        resolve(result);
-        return;
-      }
-
-      if (data.onError) {
-        cleanup();
-        closeCirclePopup();
-        const err = data.error as { message?: string } | undefined;
-        reject(new Error(err?.message || "Challenge failed."));
-        return;
-      }
-
-      if (data.onClose) {
-        cleanup();
-        closeCirclePopup();
-        reject(new Error("Verification was cancelled by user."));
-      }
-    }
-
-    window.addEventListener("message", onMsg);
-    void popup;
-  });
-}
-
-/** Run a Circle challenge (PIN setup / signing) on an existing SDK instance. */
 export function runChallenge(
   sdk: W3S,
   challengeId: string,
-  auth?: Session,
+  _auth?: Session,
 ): Promise<CircleChallengeResult> {
-  if (preferCirclePopup() && auth) {
-    toast.info("Launching secure challenge window...");
-    return executeChallengeViaPopup(challengeId, auth);
-  }
-
   return new Promise<CircleChallengeResult>((resolve, reject) => {
     toast.info("Launching secure challenge window...", {
       description: `Challenge ID: ${challengeId.substring(0, 8)}...`,
@@ -812,21 +611,11 @@ export function runChallenge(
         resolve(result);
       },
     );
-    window.setTimeout(() => {
-      const pinIframe = document.getElementById("sdkIframe") as HTMLIFrameElement | null;
-      if (!pinIframe) return;
-      pinIframe.style.display = "";
-      pinIframe.style.zIndex = "2147483647";
-      pinIframe.style.position = "fixed";
-      pinIframe.style.inset = "0";
-      pinIframe.width = "100%";
-      pinIframe.height = "100%";
-      hardenCircleIframe();
-    }, 400);
+    window.setTimeout(() => hardenCircleIframe(), 400);
+    window.setTimeout(() => hardenCircleIframe(), 1500);
   });
 }
 
-/** Poll for the wallet address (it materializes shortly after the PIN ceremony). */
 async function waitForWalletAddress(userToken: string, tries = 30): Promise<string> {
   for (let i = 0; i < tries; i++) {
     try {
@@ -840,51 +629,42 @@ async function waitForWalletAddress(userToken: string, tries = 30): Promise<stri
   return "";
 }
 
-/**
- * Full email sign-in: OTP → (first time) set a PIN + create the Arc wallet →
- * return the wallet. A single SDK instance handles both the OTP and the PIN
- * challenge.
- */
 export async function emailSignIn(
   email: string,
   onStatusUpdate?: (status: string) => void,
 ): Promise<CircleWallet> {
-  onStatusUpdate?.("sending_otp");
-  const { sdk, session } = await waitForEmailOtpSession(
-    email,
-    "Email login failed.",
-    () => onStatusUpdate?.("awaiting_otp"),
-    { waitForOpenClick: true },
-  );
-  onStatusUpdate?.("verifying_wallet");
-  // First-time users have no wallet yet. Reuse THIS sdk instance for the PIN
-  // ceremony — Circle's W3SSdk is a singleton, and a second `new W3SSdk()`
-  // plus removing the iframe leaves the PIN screen blank on Chrome.
-  const prov = await provisionWallet({ data: { userToken: session.userToken, email } });
-  let address = prov.address ?? "";
-  if (!address && prov.challengeId) {
-    onStatusUpdate?.("awaiting_pin");
-    sdk.setAuthentication({
-      userToken: session.userToken,
-      encryptionKey: session.encryptionKey,
-    });
-    hardenCircleIframe();
-    await runChallenge(sdk, prov.challengeId, session);
+  try {
+    onStatusUpdate?.("sending_otp");
+    const { sdk, session } = await waitForEmailOtpSession(email, "Email login failed.", () =>
+      onStatusUpdate?.("awaiting_otp"),
+    );
+    onStatusUpdate?.("verifying_wallet");
+    setCircleStageStatus("Connecting wallet…");
+    const prov = await provisionWallet({ data: { userToken: session.userToken, email } });
+    let address = prov.address ?? "";
+    if (!address && prov.challengeId) {
+      onStatusUpdate?.("awaiting_pin");
+      setCircleStageStatus("Enter your 6-digit PIN");
+      sdk.setAuthentication({
+        userToken: session.userToken,
+        encryptionKey: session.encryptionKey,
+      });
+      hardenCircleIframe();
+      await runChallenge(sdk, prov.challengeId, session);
 
-    onStatusUpdate?.("polling_address");
-    address = await waitForWalletAddress(session.userToken, 45);
-  }
+      onStatusUpdate?.("polling_address");
+      address = await waitForWalletAddress(session.userToken, 45);
+    }
 
-  if (!address) {
-    throw new Error("Wallet not ready yet — please try signing in again.");
+    if (!address) {
+      throw new Error("Wallet not ready yet — please try signing in again.");
+    }
+    return { identifier: email, address, chain: CHAIN, authMethod: "email" };
+  } finally {
+    removeCircleStage();
   }
-  return { identifier: email, address, chain: CHAIN, authMethod: "email" };
 }
 
-/**
- * Execute a USDC transfer out of the user's smart wallet to a destination EVM address.
- * Initiates an email OTP session for authorization, generates the challenge, and prompts the user's PIN.
- */
 export async function executeWithdrawal(
   email: string,
   recipientAddress: string,
@@ -898,7 +678,7 @@ export async function executeWithdrawal(
       email,
       "Email verification failed.",
       () => {
-        toast.loading("Email sent. Enter the code in the Circle window, then your 6-digit PIN.", {
+        toast.loading("Email sent. Enter the code in the Circle panel, then your 6-digit PIN.", {
           id: tid,
         });
       },
@@ -928,8 +708,10 @@ export async function executeWithdrawal(
     });
     await runChallenge(sdk, tx.challengeId, session);
     toast.success("Transaction authorized successfully!", { id: tid });
+    removeCircleStage();
   } catch (err) {
     toast.dismiss(tid);
+    removeCircleStage();
     throw err instanceof Error ? new Error(explainCircleLoginError(err)) : err;
   }
 }
